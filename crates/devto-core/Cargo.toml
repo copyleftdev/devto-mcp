@@ -1,0 +1,15 @@
+[package]
+name = "devto-core"
+description = "Types and the offline validation engine for the DEV (Forem) authorship API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+hegeltest.workspace = true
+serde_json.workspace = true
