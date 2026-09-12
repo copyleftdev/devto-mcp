@@ -15,7 +15,11 @@
 #![forbid(unsafe_code)]
 
 pub mod counts;
+pub mod forem;
 pub mod hyphen;
+pub mod readability;
 pub mod syllables;
 
 pub use counts::Counts;
+pub use forem::ReadingTime;
+pub use readability::Readability;
