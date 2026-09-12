@@ -208,6 +208,18 @@ These are the walls. Each one shapes scope more than any feature does.
 7. **No webhooks for authors.** `incoming_webhooks` is Mailchimp/Stripe inbound only. Anything reactive must poll.
 8. **No delete.** Articles can be unpublished, never removed.
 
+## 7a. Wire shapes, verified against an authenticated account (2026-09-12)
+
+Three things only a live authenticated call settles. All confirmed against `copyleftdev` (id 965504).
+
+**There are no `X-RateLimit-*` headers.** An authenticated `GET` returns `cache-control`, `etag`, `nel`, `server`, `via`, `x-request-id` — and nothing about the budget. A client that wants to stay inside §8's ceilings has to model them locally; there is no server-side counter to read.
+
+**`/api/articles/me/*` renames its columns.** The source lists `main_image`, `cached_tag_list` and `reading_time` in `ME_ATTRIBUTES_FOR_SERIALIZATION`, but the jbuilder view puts `cover_image`, `tag_list` (an array) and `reading_time_minutes` on the wire. A client generated from the column list decodes nothing.
+
+**`semantic_search` serializes differently from every other endpoint.** The controller calls `article.as_json(only: ...)` straight off the model instead of rendering a jbuilder view, so this one endpoint returns **raw database column names**: `main_image` not `cover_image`, `cached_tag_list` (a comma-joined string) not `tag_list` (an array), `reading_time` not `reading_time_minutes`, plus `user_id` instead of a nested `user`. It is the only endpoint on the API shaped this way.
+
+And a behavioural one worth knowing before trusting the ranking: **semantic results are not sorted by `similarity`.** A live query returned similarities 0.7853, 0.7887, 0.7120 in that order, because the controller fuses keyword and vector rankings with Reciprocal Rank Fusion (k=60) and then applies recency and quality boosts. `similarity` is `1.0 - cosine_distance` and is reported per hit, but re-sorting by it throws the actual ranking away.
+
 ## 8. Rate limiting — two independent layers, and they are strict
 
 ### Layer 1 — Rack::Attack, at the edge (`config/initializers/rack_attack.rb`)

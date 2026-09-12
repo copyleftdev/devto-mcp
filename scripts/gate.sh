@@ -24,6 +24,9 @@ echo "== test =="
 cargo test --all-features
 
 echo "== mutants =="
-cargo mutants -j "$JOBS" --timeout 90 --package devto-core
+# crates/devto-client/src/net.rs is the ureq + wall-clock adapter. Nothing in it can be
+# killed by a unit test, which is exactly why it is kept as thin as possible and excluded
+# here rather than allowed to sit in the survivor list forever.
+cargo mutants -j "$JOBS" --timeout 90 --exclude 'crates/devto-client/src/net.rs'
 
 echo "== gate passed =="

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/devto-core"]
+members = ["crates/devto-core", "crates/devto-client"]
 
 [workspace.package]
 version = "0.1.0"

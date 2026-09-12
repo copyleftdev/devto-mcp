@@ -1,0 +1,18 @@
+[package]
+name = "devto-client"
+description = "Rate-paced, version-correct HTTP client for the DEV (Forem) API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+devto-core = { path = "../devto-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2"
+ureq = { version = "3.4", default-features = false, features = ["rustls", "json", "gzip"] }
+
+[dev-dependencies]
+hegeltest.workspace = true
