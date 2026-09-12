@@ -199,3 +199,147 @@ impl Context {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::{TITLE_MAX_CHARS_FULL_POST, TITLE_MAX_CHARS_STATUS};
+
+    const ALL_LEVELS: [AiDisclosure; 4] = [
+        AiDisclosure::NotDisclosed,
+        AiDisclosure::NoAi,
+        AiDisclosure::SomeAi,
+        AiDisclosure::FullyAutonomous,
+    ];
+
+    /// The definitions are quoted so a tool surface can show a caller dev.to's own wording
+    /// rather than a paraphrase of it. Pin the load-bearing phrases from
+    /// <https://dev.to/llms.txt>; a reworded definition is a changed obligation.
+    #[test]
+    fn each_level_carries_dev_tos_own_definition() {
+        assert!(
+            AiDisclosure::NoAi
+                .definition()
+                .contains("without meaningful assistance")
+        );
+        assert!(
+            AiDisclosure::SomeAi
+                .definition()
+                .contains("meaningful AI assistance")
+        );
+        assert!(
+            AiDisclosure::FullyAutonomous
+                .definition()
+                .contains("even when a human requested or approved it")
+        );
+        assert!(
+            AiDisclosure::NotDisclosed
+                .definition()
+                .contains("omitting the field")
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        for level in ALL_LEVELS {
+            assert!(!level.definition().is_empty());
+            assert!(
+                seen.insert(level.definition()),
+                "{level:?} shares a definition"
+            );
+        }
+    }
+
+    /// Forem stores the level as a sparse enum — 0, 1, 3, 5 — not a dense one.
+    #[test]
+    fn the_stored_enum_values_match_forem() {
+        assert_eq!(AiDisclosure::NotDisclosed.stored_enum(), 0);
+        assert_eq!(AiDisclosure::NoAi.stored_enum(), 1);
+        assert_eq!(AiDisclosure::SomeAi.stored_enum(), 3);
+        assert_eq!(AiDisclosure::FullyAutonomous.stored_enum(), 5);
+    }
+
+    #[test]
+    fn wire_values_are_distinct_and_match_the_serialized_form() {
+        let mut seen = std::collections::BTreeSet::new();
+        for level in ALL_LEVELS {
+            assert!(seen.insert(level.wire_value()));
+            assert_eq!(
+                serde_json::to_string(&level).unwrap(),
+                format!("\"{}\"", level.wire_value())
+            );
+        }
+    }
+
+    /// Forem accepts a generous alias set in front matter, and rejects anything outside it
+    /// rather than guessing.
+    #[test]
+    fn front_matter_aliases_resolve_the_way_forem_resolves_them() {
+        for alias in ["no", "none", "human", "hand-written", "100%_human", "1"] {
+            assert_eq!(
+                AiDisclosure::from_front_matter_value(alias),
+                Some(AiDisclosure::NoAi),
+                "{alias}"
+            );
+        }
+        for alias in ["some", "assisted", "ai_assist", "3"] {
+            assert_eq!(
+                AiDisclosure::from_front_matter_value(alias),
+                Some(AiDisclosure::SomeAi),
+                "{alias}"
+            );
+        }
+        for alias in ["autonomous", "generated", "fully_ai", "5"] {
+            assert_eq!(
+                AiDisclosure::from_front_matter_value(alias),
+                Some(AiDisclosure::FullyAutonomous),
+                "{alias}"
+            );
+        }
+        assert_eq!(
+            AiDisclosure::from_front_matter_value("  UNSTATED  "),
+            Some(AiDisclosure::NotDisclosed)
+        );
+        assert_eq!(AiDisclosure::from_front_matter_value("maybe"), None);
+        assert_eq!(AiDisclosure::from_front_matter_value(""), None);
+    }
+
+    /// Status posts get a longer title because the title is the post.
+    #[test]
+    fn the_title_limit_depends_on_the_post_type() {
+        let mut d = Draft::new("t", "b");
+        assert_eq!(d.title_max_chars(), TITLE_MAX_CHARS_FULL_POST);
+        d.article_type = ArticleType::Status;
+        assert_eq!(d.title_max_chars(), TITLE_MAX_CHARS_STATUS);
+        d.article_type = ArticleType::FullscreenEmbed;
+        assert_eq!(d.title_max_chars(), TITLE_MAX_CHARS_FULL_POST);
+    }
+
+    #[test]
+    fn a_new_draft_is_unpublished_and_undisclosed() {
+        let d = Draft::new("Title", "Body");
+        assert_eq!(d.title, "Title");
+        assert_eq!(d.body_markdown, "Body");
+        assert!(!d.published);
+        assert_eq!(d.ai_disclosure_level, AiDisclosure::NotDisclosed);
+        assert_eq!(d.article_type, ArticleType::FullPost);
+        assert!(d.tags.is_empty());
+    }
+
+    #[test]
+    fn the_context_constructors_set_the_operation_they_name() {
+        assert_eq!(Context::create().operation, Operation::Create);
+        assert!(matches!(
+            Context::update(true).operation,
+            Operation::Update {
+                already_published: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Context::update(false).operation,
+            Operation::Update {
+                already_published: false,
+                ..
+            }
+        ));
+    }
+}

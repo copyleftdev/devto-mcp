@@ -134,8 +134,22 @@ fn body_is_status_safe(body: &str) -> bool {
 fn check_tags(draft: &Draft, report: &mut Report) {
     let normalized = tags::normalize(&draft.tags);
 
+    for (index, entry) in draft.tags.iter().enumerate() {
+        if !entry.is_empty() && !normalized.iter().any(|t| t.source_index == index) {
+            report.push(Finding::warning(
+                RuleId::TagDroppedAsEmpty,
+                Field::Tags,
+                format!(
+                    "Entry {index} of the tags array holds only whitespace or separators, so \
+                     Forem drops it and reports nothing."
+                ),
+                "Remove the empty entry, or put a tag in it.",
+            ));
+        }
+    }
+
     for tag in &normalized {
-        if tag.source_index < draft.tags.len() && draft.tags[tag.source_index].contains(',') {
+        if draft.tags[tag.source_index].contains(',') {
             report.push(Finding::warning(
                 RuleId::TagSplitOnComma,
                 Field::Tags,
@@ -501,6 +515,7 @@ fn conflicting_keys(draft: &Draft, fm: &FrontMatter) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::draft::RecentTitle;
+    use crate::limits::TITLE_MAX_CHARS_FULL_POST;
     use crate::tags;
     use hegel::Generator;
     use hegel::generators as g;
@@ -627,6 +642,470 @@ mod tests {
                 d.body_markdown.len()
             );
         }
+    }
+
+    fn fm_body(pairs: &[(&str, &str)]) -> String {
+        let mut s = String::from("---\n");
+        for (k, v) in pairs {
+            s.push_str(&format!("{k}: {v}\n"));
+        }
+        s.push_str("---\n\nBody.\n");
+        s
+    }
+
+    fn conflicts_for(d: &Draft) -> Vec<String> {
+        conflicting_keys(d, &frontmatter::parse(&d.body_markdown))
+    }
+
+    fn disclosed(title: &str) -> Draft {
+        let mut d = Draft::new(title, "Body.");
+        d.ai_disclosure_level = AiDisclosure::NoAi;
+        d
+    }
+
+    // ---- title and tag boundaries ----------------------------------------------------
+
+    #[test]
+    fn the_title_limit_admits_exactly_its_maximum() {
+        let mut d = disclosed(&"a".repeat(TITLE_MAX_CHARS_FULL_POST));
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::TitleTooLong));
+        d.title = "a".repeat(TITLE_MAX_CHARS_FULL_POST + 1);
+        assert!(validate(&d, NOW, &Context::create()).has_rule(RuleId::TitleTooLong));
+    }
+
+    #[test]
+    fn four_tags_fit_and_five_do_not() {
+        let mut d = disclosed("Title");
+        d.tags = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::TooManyTags));
+        d.tags.push("e".into());
+        let report = validate(&d, NOW, &Context::create());
+        assert!(report.has_rule(RuleId::TooManyTags));
+        assert!(
+            report.blocking().any(|f| f.remedy.contains("1 tag")),
+            "the remedy should say how many to remove"
+        );
+    }
+
+    /// An entry that normalizes away leaves no tag and no error, so the report has to say so.
+    #[test]
+    fn an_entry_that_normalizes_to_nothing_is_reported() {
+        let mut d = disclosed("Title");
+        d.tags = vec!["rust".into(), "   ".into()];
+        let report = validate(&d, NOW, &Context::create());
+        assert!(report.has_rule(RuleId::TagDroppedAsEmpty));
+        assert!(
+            report.is_sendable(),
+            "Forem accepts it, it just loses the tag"
+        );
+
+        d.tags = vec!["rust".into()];
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::TagDroppedAsEmpty));
+    }
+
+    /// The message names each offending character once, however many times it occurs.
+    #[test]
+    fn the_invalid_character_message_lists_each_character_once() {
+        let mut d = disclosed("Title");
+        d.tags = vec!["a-b-c d".into()];
+        let report = validate(&d, NOW, &Context::create());
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule == RuleId::TagInvalidCharacters)
+            .expect("expected a character finding");
+        assert!(finding.message.contains("'-'"), "{}", finding.message);
+        assert!(finding.message.contains("' '"), "{}", finding.message);
+        assert_eq!(
+            finding.message.matches("'-'").count(),
+            1,
+            "the repeated hyphen should be named once: {}",
+            finding.message
+        );
+        assert!(finding.remedy.contains("abcd"));
+    }
+
+    #[test]
+    fn a_tag_of_only_punctuation_gets_a_generic_remedy() {
+        let mut d = disclosed("Title");
+        d.tags = vec!["---".into()];
+        let report = validate(&d, NOW, &Context::create());
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule == RuleId::TagInvalidCharacters)
+            .expect("expected a character finding");
+        assert!(
+            finding.remedy.contains("letters and digits"),
+            "{}",
+            finding.remedy
+        );
+    }
+
+    #[test]
+    fn a_tag_whose_case_changes_on_save_is_flagged() {
+        let mut d = disclosed("Title");
+        d.tags = vec!["Rust".into()];
+        let report = validate(&d, NOW, &Context::create());
+        assert!(report.has_rule(RuleId::TagNotLowercase));
+        assert!(report.is_sendable());
+
+        d.tags = vec!["rust".into()];
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::TagNotLowercase));
+    }
+
+    /// The duplicate window is measured from the moment of the earlier post, and a title
+    /// exactly five minutes old is already outside it.
+    #[test]
+    fn the_duplicate_title_window_is_exactly_five_minutes() {
+        let d = disclosed("Exactly this title");
+        let collides = |age: i64| {
+            let mut ctx = Context::create();
+            ctx.recent_titles = vec![RecentTitle {
+                title: "Exactly this title".into(),
+                created_at: NOW - age,
+            }];
+            validate(&d, NOW, &ctx).has_rule(RuleId::TitleDuplicateRecent)
+        };
+        assert!(
+            collides(DUPLICATE_TITLE_WINDOW_SECS - 1),
+            "a second inside the window still collides"
+        );
+        assert!(
+            !collides(DUPLICATE_TITLE_WINDOW_SECS),
+            "exactly five minutes old is outside the window"
+        );
+        assert!(!collides(DUPLICATE_TITLE_WINDOW_SECS + 1));
+    }
+
+    /// `future_or_current_published_at` passes when published_at is strictly newer than
+    /// fifteen minutes ago, so the floor itself is already too old.
+    #[test]
+    fn the_published_at_floor_is_exactly_fifteen_minutes() {
+        let mut d = disclosed("Title");
+        d.published = true;
+
+        let scheduled = Context {
+            operation: Operation::Update {
+                already_published: false,
+                scheduled: true,
+                main_image_from_frontmatter: false,
+            },
+            ..Context::create()
+        };
+
+        for ctx in [Context::create(), scheduled] {
+            d.published_at = Some(NOW - PUBLISHED_AT_PAST_GRACE_SECS + 1);
+            assert!(
+                !validate(&d, NOW, &ctx).has_rule(RuleId::PublishedAtInPast),
+                "a second inside the grace period still counts as current"
+            );
+
+            d.published_at = Some(NOW - PUBLISHED_AT_PAST_GRACE_SECS);
+            assert!(
+                validate(&d, NOW, &ctx).has_rule(RuleId::PublishedAtInPast),
+                "exactly fifteen minutes back is already too far in the past"
+            );
+        }
+    }
+
+    // ---- status posts ----------------------------------------------------------------
+
+    #[test]
+    fn a_status_post_may_carry_embeds_but_not_prose() {
+        let mut d = disclosed("Look at this");
+        d.article_type = ArticleType::Status;
+
+        d.body_markdown = String::new();
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::StatusBodyNotAllowed));
+
+        d.body_markdown = "  {% embed https://example.com %}  ".into();
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::StatusBodyNotAllowed));
+
+        d.body_markdown = "{% embed a %}\n{% embed b %}".into();
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::StatusBodyNotAllowed));
+
+        for prose in [
+            "Some words.",
+            "Some words {% embed a %}",
+            "{% embed a %} trailing words",
+            "{% unterminated",
+        ] {
+            d.body_markdown = prose.into();
+            assert!(
+                validate(&d, NOW, &Context::create()).has_rule(RuleId::StatusBodyNotAllowed),
+                "{prose:?} should not be allowed in a status post"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_post_may_carry_whatever_it_likes() {
+        let mut d = disclosed("Title");
+        d.body_markdown = "Ordinary prose.".into();
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::StatusBodyNotAllowed));
+    }
+
+    // ---- article type ----------------------------------------------------------------
+
+    #[test]
+    fn fullscreen_embed_needs_an_admin() {
+        let mut d = disclosed("Title");
+        d.article_type = ArticleType::FullscreenEmbed;
+        assert!(
+            validate(&d, NOW, &Context::create()).has_rule(RuleId::FullscreenEmbedRequiresAdmin)
+        );
+
+        let ctx = Context {
+            author_is_admin: true,
+            ..Context::create()
+        };
+        assert!(!validate(&d, NOW, &ctx).has_rule(RuleId::FullscreenEmbedRequiresAdmin));
+
+        d.article_type = ArticleType::FullPost;
+        assert!(
+            !validate(&d, NOW, &Context::create()).has_rule(RuleId::FullscreenEmbedRequiresAdmin)
+        );
+    }
+
+    // ---- cover image -----------------------------------------------------------------
+
+    #[test]
+    fn the_cover_image_must_be_an_absolute_web_url() {
+        let mut d = disclosed("Title");
+
+        d.main_image = Some("https://example.com/cover.png".into());
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::MainImageScheme));
+
+        d.main_image = Some("cover.png".into());
+        assert!(validate(&d, NOW, &Context::create()).has_rule(RuleId::MainImageScheme));
+
+        d.main_image = Some(String::new());
+        assert!(
+            !validate(&d, NOW, &Context::create()).has_rule(RuleId::MainImageScheme),
+            "an empty value is an absent value, not a broken URL"
+        );
+
+        d.main_image = None;
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::MainImageScheme));
+    }
+
+    /// A local cover image URL is fine — Forem only rejects local hosts for canonical URLs.
+    #[test]
+    fn a_local_cover_image_url_is_allowed() {
+        let mut d = disclosed("Title");
+        d.main_image = Some("http://localhost:3000/cover.png".into());
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::MainImageScheme));
+    }
+
+    /// Once a cover image has come from front matter it is permanently front-matter-driven,
+    /// so a later body with front matter but no cover_image key clears it.
+    #[test]
+    fn a_sticky_front_matter_cover_image_is_cleared_by_a_body_without_one() {
+        let sticky = Context {
+            operation: Operation::Update {
+                already_published: false,
+                scheduled: false,
+                main_image_from_frontmatter: true,
+            },
+            ..Context::create()
+        };
+
+        let mut d = disclosed("Title");
+        d.body_markdown = fm_body(&[("title", "Title")]);
+        assert!(validate(&d, NOW, &sticky).has_rule(RuleId::MainImageIgnoredFrontMatterSticky));
+
+        d.body_markdown = fm_body(&[("cover_image", "https://example.com/c.png")]);
+        assert!(
+            !validate(&d, NOW, &sticky).has_rule(RuleId::MainImageIgnoredFrontMatterSticky),
+            "front matter that names a cover image sets it rather than clearing it"
+        );
+
+        d.body_markdown = "No front matter here.".into();
+        assert!(
+            !validate(&d, NOW, &sticky).has_rule(RuleId::MainImageIgnoredFrontMatterSticky),
+            "with no front matter at all, evaluate_front_matter never runs"
+        );
+
+        d.body_markdown = fm_body(&[("title", "Title")]);
+        assert!(
+            !validate(&d, NOW, &Context::update(false))
+                .has_rule(RuleId::MainImageIgnoredFrontMatterSticky),
+            "an article that was never front-matter-driven is unaffected"
+        );
+    }
+
+    // ---- video -----------------------------------------------------------------------
+
+    #[test]
+    fn the_video_source_must_be_one_of_the_three_permitted_hosts() {
+        let mut d = disclosed("Title");
+
+        for ok in [
+            "https://www.youtube.com/watch?v=abc",
+            "https://youtu.be/abc",
+            "https://player.mux.com/abc",
+            "https://twitch.tv/videos/1",
+        ] {
+            d.video_source_url = Some(ok.into());
+            let report = validate(&d, NOW, &Context::create());
+            assert!(!report.has_rule(RuleId::VideoSourceUrlNotAllowed), "{ok}");
+            assert!(!report.has_rule(RuleId::VideoSourceUrlNotHttps), "{ok}");
+        }
+
+        d.video_source_url = Some("https://vimeo.com/1".into());
+        assert!(validate(&d, NOW, &Context::create()).has_rule(RuleId::VideoSourceUrlNotAllowed));
+
+        d.video_source_url = None;
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::VideoSourceUrlNotAllowed));
+
+        d.video_source_url = Some(String::new());
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::VideoSourceUrlNotAllowed));
+    }
+
+    /// The controller's regex accepts http, the model's validator does not. A URL that
+    /// passes the first and fails the second is the worst case: it looks permitted.
+    #[test]
+    fn an_http_video_source_passes_the_allowlist_and_fails_the_model() {
+        let mut d = disclosed("Title");
+        d.video_source_url = Some("http://www.youtube.com/watch?v=abc".into());
+        let report = validate(&d, NOW, &Context::create());
+        assert!(!report.has_rule(RuleId::VideoSourceUrlNotAllowed));
+        assert!(report.has_rule(RuleId::VideoSourceUrlNotHttps));
+    }
+
+    // ---- disclosure ------------------------------------------------------------------
+
+    #[test]
+    fn a_disclosure_in_front_matter_satisfies_the_warning() {
+        let mut d = Draft::new("Title", "Body.");
+        assert!(validate(&d, NOW, &Context::create()).has_rule(RuleId::DisclosureNotDisclosed));
+
+        d.ai_disclosure_level = AiDisclosure::SomeAi;
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::DisclosureNotDisclosed));
+
+        d.ai_disclosure_level = AiDisclosure::NotDisclosed;
+        for key in [
+            "ai_disclosure_level",
+            "ai_disclosure",
+            "ai_generated",
+            "ai_assisted",
+        ] {
+            d.body_markdown = fm_body(&[(key, "some_ai")]);
+            assert!(
+                !validate(&d, NOW, &Context::create()).has_rule(RuleId::DisclosureNotDisclosed),
+                "front matter key {key} should count as a disclosure"
+            );
+        }
+
+        d.body_markdown = fm_body(&[("title", "Title")]);
+        assert!(validate(&d, NOW, &Context::create()).has_rule(RuleId::DisclosureNotDisclosed));
+    }
+
+    // ---- front matter conflicts ------------------------------------------------------
+
+    #[test]
+    fn a_front_matter_key_conflicts_only_when_it_differs_from_the_payload() {
+        let mut d = disclosed("Payload title");
+        d.tags = vec!["rust".into()];
+        d.published = false;
+        d.published_at = Some(NOW + 3600);
+        d.main_image = Some("https://example.com/a.png".into());
+        d.canonical_url = Some("https://example.com/a".into());
+        d.description = Some("Payload description".into());
+        d.series = Some("Payload series".into());
+
+        let differing = [
+            ("title", "Front title", "title"),
+            ("tags", "webdev", "tags"),
+            ("published", "true", "published"),
+            ("published_at", "2027-01-01", "published_at"),
+            ("date", "2027-01-01", "published_at"),
+            ("cover_image", "https://example.com/b.png", "cover_image"),
+            ("canonical_url", "https://example.com/b", "canonical_url"),
+            ("description", "Front description", "description"),
+            ("series", "Front series", "series"),
+        ];
+        for (key, value, expected) in differing {
+            d.body_markdown = fm_body(&[(key, value)]);
+            let found = conflicts_for(&d);
+            assert!(
+                found.iter().any(|c| c.starts_with(expected)),
+                "front matter {key}: {value} should conflict, got {found:?}"
+            );
+        }
+
+        let matching = [
+            ("title", "Payload title"),
+            ("published", "false"),
+            ("cover_image", "https://example.com/a.png"),
+            ("canonical_url", "https://example.com/a"),
+            ("description", "Payload description"),
+            ("series", "Payload series"),
+        ];
+        for (key, value) in matching {
+            d.body_markdown = fm_body(&[(key, value)]);
+            assert!(
+                conflicts_for(&d).is_empty(),
+                "front matter {key}: {value} matches the payload and should not conflict"
+            );
+        }
+    }
+
+    /// A key only conflicts when the payload actually sets the matching field.
+    #[test]
+    fn front_matter_does_not_conflict_with_fields_the_payload_leaves_unset() {
+        let mut d = disclosed("");
+        d.body_markdown = fm_body(&[
+            ("tags", "webdev"),
+            ("cover_image", "https://example.com/b.png"),
+            ("canonical_url", "https://example.com/b"),
+            ("description", "Front description"),
+            ("series", "Front series"),
+            ("published_at", "2027-01-01"),
+        ]);
+        assert!(conflicts_for(&d).is_empty(), "{:?}", conflicts_for(&d));
+    }
+
+    /// Forem only honours `published` when it is literally true or false.
+    #[test]
+    fn an_uninterpretable_published_value_is_not_a_conflict() {
+        let mut d = disclosed("Title");
+        d.published = false;
+        d.body_markdown = fm_body(&[("published", "yes")]);
+        assert!(conflicts_for(&d).is_empty());
+    }
+
+    #[test]
+    fn a_body_with_no_front_matter_never_conflicts() {
+        let mut d = disclosed("Title");
+        d.tags = vec!["rust".into()];
+        d.series = Some("S".into());
+        d.body_markdown = "Just prose, and a --- rule in the middle.".into();
+        let report = validate(&d, NOW, &Context::create());
+        assert!(!report.has_rule(RuleId::FrontMatterOverridesPayload));
+        assert!(!report.has_rule(RuleId::FrontMatterDropsSeries));
+        assert!(conflicts_for(&d).is_empty());
+    }
+
+    /// The series is dropped only when the front matter names a title and no series.
+    #[test]
+    fn front_matter_drops_the_series_only_when_it_names_a_title_and_no_series() {
+        let mut d = disclosed("Title");
+        d.series = Some("My series".into());
+
+        d.body_markdown = fm_body(&[("title", "Title")]);
+        assert!(validate(&d, NOW, &Context::create()).has_rule(RuleId::FrontMatterDropsSeries));
+
+        d.body_markdown = fm_body(&[("title", "Title"), ("series", "My series")]);
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::FrontMatterDropsSeries));
+
+        d.body_markdown = fm_body(&[("description", "d")]);
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::FrontMatterDropsSeries));
+
+        d.series = None;
+        d.body_markdown = fm_body(&[("title", "Title")]);
+        assert!(!validate(&d, NOW, &Context::create()).has_rule(RuleId::FrontMatterDropsSeries));
     }
 
     // ---- properties ------------------------------------------------------------------

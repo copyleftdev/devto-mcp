@@ -148,6 +148,60 @@ mod tests {
         assert!(parse("\u{feff}---\ntitle: X\n---\n").present);
     }
 
+    /// A line with nothing before the colon is not a key. Recording it would put an empty
+    /// string in the key set and make every `has()` check unreliable.
+    #[test]
+    fn a_line_with_no_key_is_not_a_key() {
+        let fm = parse("---\n: orphaned\ntitle: X\n---\n");
+        assert_eq!(fm.keys.len(), 1);
+        assert_eq!(fm.get("title"), Some("X"));
+        assert!(!fm.has(""));
+    }
+
+    /// Keys are letters, digits and underscores. A line that merely contains a colon —
+    /// prose, a URL, a time — is not a key/value pair.
+    #[test]
+    fn a_key_with_punctuation_or_spaces_is_not_a_key() {
+        let fm = parse("---\nsome key: v\nsee https://example.com\ntitle: X\n---\n");
+        assert_eq!(fm.get("title"), Some("X"));
+        assert!(!fm.has("some key"));
+        assert!(!fm.has("see https"));
+        assert_eq!(fm.keys.len(), 1);
+    }
+
+    /// Only a matched pair comes off. One stray quote is part of the value.
+    #[test]
+    fn an_unmatched_quote_is_left_alone() {
+        assert_eq!(
+            parse("---\ntitle: \"half quoted\n---\n").get("title"),
+            Some("\"half quoted")
+        );
+        assert_eq!(
+            parse("---\ntitle: half quoted\"\n---\n").get("title"),
+            Some("half quoted\"")
+        );
+        assert_eq!(
+            parse("---\ntitle: 'mismatched\"\n---\n").get("title"),
+            Some("'mismatched\"")
+        );
+        assert_eq!(
+            parse("---\ntitle: half quoted'\n---\n").get("title"),
+            Some("half quoted'")
+        );
+        assert_eq!(
+            parse("---\ntitle: \"mismatched'\n---\n").get("title"),
+            Some("\"mismatched'")
+        );
+    }
+
+    #[test]
+    fn a_later_line_wins_when_a_key_repeats() {
+        assert_eq!(
+            parse("---\ntitle: A\ntitle: B\n---\n").get("title"),
+            Some("B")
+        );
+    }
+
     /// The body is whatever the caller wrote. Front matter detection must never panic on it.
     #[hegel::test]
     fn parse_never_panics(tc: hegel::TestCase) {

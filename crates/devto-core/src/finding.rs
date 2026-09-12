@@ -41,6 +41,7 @@ pub enum RuleId {
     TagListTooLong,
     TagSplitOnComma,
     TagNotLowercase,
+    TagDroppedAsEmpty,
     CanonicalUrlWhitespace,
     CanonicalUrlScheme,
     CanonicalUrlLocal,
@@ -71,6 +72,7 @@ impl RuleId {
             Self::TagListTooLong => "TAG_LIST_TOO_LONG",
             Self::TagSplitOnComma => "TAG_SPLIT_ON_COMMA",
             Self::TagNotLowercase => "TAG_NOT_LOWERCASE",
+            Self::TagDroppedAsEmpty => "TAG_DROPPED_AS_EMPTY",
             Self::CanonicalUrlWhitespace => "CANONICAL_URL_WHITESPACE",
             Self::CanonicalUrlScheme => "CANONICAL_URL_SCHEME",
             Self::CanonicalUrlLocal => "CANONICAL_URL_LOCAL",
@@ -173,5 +175,121 @@ impl Report {
 
     pub fn len(&self) -> usize {
         self.findings.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_RULES: [RuleId; 26] = [
+        RuleId::TitleBlank,
+        RuleId::TitleTooLong,
+        RuleId::TitleDuplicateRecent,
+        RuleId::BodyTooLarge,
+        RuleId::StatusBodyNotAllowed,
+        RuleId::FullscreenEmbedRequiresAdmin,
+        RuleId::TooManyTags,
+        RuleId::TagInvalidCharacters,
+        RuleId::TagTooLong,
+        RuleId::TagListTooLong,
+        RuleId::TagSplitOnComma,
+        RuleId::TagNotLowercase,
+        RuleId::TagDroppedAsEmpty,
+        RuleId::CanonicalUrlWhitespace,
+        RuleId::CanonicalUrlScheme,
+        RuleId::CanonicalUrlLocal,
+        RuleId::CanonicalUrlCollision,
+        RuleId::MainImageScheme,
+        RuleId::MainImageIgnoredFrontMatterSticky,
+        RuleId::VideoSourceUrlNotAllowed,
+        RuleId::VideoSourceUrlNotHttps,
+        RuleId::PublishedAtInPast,
+        RuleId::PublishedAtSilentlyDropped,
+        RuleId::DisclosureNotDisclosed,
+        RuleId::FrontMatterOverridesPayload,
+        RuleId::FrontMatterDropsSeries,
+    ];
+
+    /// Rule ids are the stable part of the contract: a caller may branch on them, so they
+    /// have to be distinct, and the string form has to be the one that appears in JSON.
+    #[test]
+    fn rule_ids_are_distinct_and_agree_with_their_serialized_form() {
+        let mut seen = std::collections::BTreeSet::new();
+        for rule in ALL_RULES {
+            let name = rule.as_str();
+            assert!(!name.is_empty(), "{rule:?} has no name");
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                "{name} is not SCREAMING_SNAKE_CASE"
+            );
+            assert_eq!(
+                serde_json::to_string(&rule).unwrap(),
+                format!("\"{name}\""),
+                "as_str and serde disagree for {rule:?}"
+            );
+            assert!(seen.insert(name), "duplicate rule id {name}");
+        }
+    }
+
+    fn warning(rule: RuleId) -> Finding {
+        Finding::warning(rule, Field::Tags, "message", "remedy")
+    }
+
+    fn blocking(rule: RuleId) -> Finding {
+        Finding::blocking(rule, Field::Title, "message", "remedy")
+    }
+
+    #[test]
+    fn an_empty_report_is_sendable() {
+        let report = Report::default();
+        assert!(report.is_empty());
+        assert_eq!(report.len(), 0);
+        assert!(report.is_sendable());
+        assert_eq!(report.blocking().count(), 0);
+        assert_eq!(report.warnings().count(), 0);
+    }
+
+    /// The severity split is the whole point of the report: a warning describes something
+    /// Forem will accept and quietly do differently, so it must never stop a send.
+    #[test]
+    fn warnings_are_counted_but_do_not_block() {
+        let mut report = Report::default();
+        report.push(warning(RuleId::DisclosureNotDisclosed));
+        report.push(warning(RuleId::TagSplitOnComma));
+
+        assert!(!report.is_empty());
+        assert_eq!(report.len(), 2);
+        assert!(report.is_sendable());
+        assert_eq!(report.warnings().count(), 2);
+        assert_eq!(report.blocking().count(), 0);
+
+        report.push(blocking(RuleId::TitleBlank));
+        assert_eq!(report.len(), 3);
+        assert!(!report.is_sendable());
+        assert_eq!(report.warnings().count(), 2);
+        assert_eq!(report.blocking().count(), 1);
+        assert_eq!(
+            report.blocking().next().map(|f| f.rule),
+            Some(RuleId::TitleBlank)
+        );
+    }
+
+    #[test]
+    fn has_rule_finds_only_what_was_pushed() {
+        let mut report = Report::default();
+        report.push(blocking(RuleId::TitleBlank));
+        assert!(report.has_rule(RuleId::TitleBlank));
+        assert!(!report.has_rule(RuleId::TitleTooLong));
+    }
+
+    #[test]
+    fn the_constructors_set_the_severity_they_name() {
+        assert_eq!(blocking(RuleId::TitleBlank).severity, Severity::Blocking);
+        assert_eq!(warning(RuleId::TagSplitOnComma).severity, Severity::Warning);
+        assert_eq!(blocking(RuleId::TitleBlank).field, Field::Title);
+        assert_eq!(blocking(RuleId::TitleBlank).message, "message");
+        assert_eq!(blocking(RuleId::TitleBlank).remedy, "remedy");
     }
 }

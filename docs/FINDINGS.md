@@ -142,6 +142,14 @@ Three writable fields are absent from the published spec. A spec-generated clien
 
 Note the asymmetry: front matter says **`cover_image`**, the API field is **`main_image`**. Two spellings for one concept, and a client that mixes them silently loses the image.
 
+**And front matter does not merely coexist with the payload — it overrides it.** `Article#evaluate_front_matter` runs in `before_validation`, *after* the controller has assigned the params, and reassigns `title`, `tag_list`, `published`, `published_at`, `main_image`, `canonical_url`, `description` and `collection_id` from the front matter. A client that sends `tags: ["rust"]` alongside a body whose front matter says `tags: webdev, beginners` gets the front matter's tags and no error. Three further traps in the same method:
+
+- `self.collection_id = nil if hash["title"].present?` — front matter carrying a **title but no series silently removes the article from its series**.
+- `set_tag_list` clears the list first, so front matter tags **replace** rather than merge.
+- `main_image_from_frontmatter` is sticky: once a cover image has been set from front matter, it is forever front-matter-driven, and a later body with front matter but no `cover_image` key **clears the cover image**.
+
+Forem also accepts a wide alias set for the disclosure level in front matter — `ai_disclosure`, `ai_generated: true`, `ai_assisted: true`, and values like `human`, `assisted`, `autonomous`, or the bare enum integers.
+
 ## 5. Constraint catalogue — the pre-flight table
 
 Every one of these is a 422 the model can avoid. Read from `app/models/article.rb`, `app/models/tag.rb`, `app/models/concerns/taggable.rb`.
@@ -153,7 +161,7 @@ Every one of these is a 422 the model can avoid. Read from `app/models/article.r
 | `title` — `status` | ≤ 256 chars |
 | `title` uniqueness | Same user + same title within **5 minutes** → rejected |
 | Tag count | ≤ **4** (`MAX_TAG_LIST_SIZE`) |
-| Tag name | ≤ **30 chars**, `/\A[[:alnum:]]+\z/i` — **no hyphens, no diacritics, no dots** |
+| Tag name | ≤ **30 chars**, `/\A[[:alnum:]]+\z/i` — **no hyphens, no dots, no underscores**. Unicode-aware, so diacritics *are* allowed: `español` is a live tag. The comment above the regex in `tag.rb` says otherwise and is stale. Also downcased on save (`ActsAsTaggableOn.force_lowercase = true`) |
 | `cached_tag_list` | ≤ 126 chars total |
 | `canonical_url` | http/https, no local hosts, **no whitespace**, **unique among published articles** |
 | `main_image` | http/https URL |

@@ -31,9 +31,6 @@ pub fn normalize(tags: &[String]) -> Vec<NormalizedTag> {
                 continue;
             }
             let unquoted = strip_matching_quotes(raw);
-            if unquoted.is_empty() {
-                continue;
-            }
             out.push(NormalizedTag {
                 source_index,
                 raw: raw.to_string(),
@@ -45,9 +42,13 @@ pub fn normalize(tags: &[String]) -> Vec<NormalizedTag> {
 }
 
 /// `ActsAsTaggableOn::DefaultParser` removes one matched pair of surrounding quotes.
+///
+/// The pair is only removed when something survives it. Stripping down to nothing would
+/// make normalization non-idempotent — `""''""` collapses one layer per pass — and would
+/// silently delete the tag instead of letting the character rules reject it.
 fn strip_matching_quotes(s: &str) -> &str {
     let bytes = s.as_bytes();
-    if bytes.len() >= 2 {
+    if bytes.len() > 2 {
         let first = bytes[0];
         let last = bytes[bytes.len() - 1];
         if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
@@ -85,6 +86,7 @@ pub fn tag_list_too_long(tags: &[NormalizedTag]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::MAX_TAGS;
 
     fn v(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
@@ -129,6 +131,44 @@ mod tests {
     fn cached_list_joins_with_comma_space() {
         let tags = normalize(&v(&["rust", "zig"]));
         assert_eq!(cached_tag_list(&tags), "rust, zig");
+    }
+
+    #[test]
+    fn a_quote_pair_is_only_removed_when_something_survives_it() {
+        // Stripping to nothing would delete the tag silently and make normalization
+        // non-idempotent, so the pair stays and the character rules reject it instead.
+        assert_eq!(normalize(&v(&["''"]))[0].value, "''");
+        assert_eq!(normalize(&v(&["\"\""]))[0].value, "\"\"");
+        assert_eq!(normalize(&v(&["''''"]))[0].value, "''");
+    }
+
+    #[test]
+    fn the_tag_length_limit_is_thirty_characters() {
+        assert!(!is_too_long(&"a".repeat(TAG_MAX_CHARS)));
+        assert!(is_too_long(&"a".repeat(TAG_MAX_CHARS + 1)));
+        assert!(
+            !is_too_long(&"é".repeat(TAG_MAX_CHARS)),
+            "the limit counts characters, not the bytes they take"
+        );
+    }
+
+    #[test]
+    fn the_joined_list_limit_bites_one_character_past_the_maximum() {
+        let at_limit = normalize(&vec!["a".repeat(TAG_MAX_CHARS); MAX_TAGS]);
+        assert_eq!(
+            cached_tag_list(&at_limit).chars().count(),
+            TAG_LIST_MAX_CHARS
+        );
+        assert!(!tag_list_too_long(&at_limit));
+
+        let mut over = vec!["a".repeat(TAG_MAX_CHARS); MAX_TAGS];
+        over.push("a".to_string());
+        let over = normalize(&over);
+        assert_eq!(
+            cached_tag_list(&over).chars().count(),
+            TAG_LIST_MAX_CHARS + 3
+        );
+        assert!(tag_list_too_long(&over));
     }
 
     fn any_tag_input(tc: &hegel::TestCase) -> Vec<String> {

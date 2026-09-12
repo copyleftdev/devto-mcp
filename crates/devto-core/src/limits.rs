@@ -25,3 +25,33 @@ pub const DUPLICATE_TITLE_WINDOW_SECS: i64 = 5 * 60;
 
 /// Hosts Forem treats as local and rejects for canonical and feed URLs.
 pub const LOCAL_HOSTS: [&str; 4] = ["localhost", "127.0.0.1", "0.0.0.0", "::1"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These are facts about Forem, not arithmetic. Pin every value to its literal so a
+    /// slip in the expression shows up as a failing test rather than a silently wrong limit
+    /// that only surfaces as a 422 against the live API.
+    #[test]
+    fn every_limit_matches_forem() {
+        assert_eq!(BODY_MAX_BYTES, 819_200, "800.kilobytes");
+        assert_eq!(TITLE_MAX_CHARS_FULL_POST, 128);
+        assert_eq!(TITLE_MAX_CHARS_STATUS, 256);
+        assert_eq!(MAX_TAGS, 4);
+        assert_eq!(TAG_MAX_CHARS, 30);
+        assert_eq!(TAG_LIST_MAX_CHARS, 126);
+        assert_eq!(PUBLISHED_AT_PAST_GRACE_SECS, 900, "15.minutes");
+        assert_eq!(DUPLICATE_TITLE_WINDOW_SECS, 300, "5.minutes");
+        assert_eq!(LOCAL_HOSTS.len(), 4);
+    }
+
+    /// Four tags at the maximum length land exactly on the stored-list limit. That is not a
+    /// coincidence worth relying on, but it is worth knowing: the list cap can only bite
+    /// when tags are long, never when there are merely four of them.
+    #[test]
+    fn four_maximum_length_tags_sit_exactly_on_the_list_limit() {
+        let joined = MAX_TAGS * TAG_MAX_CHARS + (MAX_TAGS - 1) * ", ".len();
+        assert_eq!(joined, TAG_LIST_MAX_CHARS);
+    }
+}

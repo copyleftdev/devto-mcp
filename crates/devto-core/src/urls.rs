@@ -57,17 +57,31 @@ fn split_scheme(url: &str) -> Option<(String, &str)> {
 fn host_of(rest: &str) -> String {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let after_userinfo = authority.rsplit('@').next().unwrap_or_default();
-    let without_port = match after_userinfo.rfind(':') {
-        // Leave bracketed IPv6 literals alone.
-        Some(i) if !after_userinfo.starts_with('[') => &after_userinfo[..i],
-        _ => after_userinfo,
-    };
-    without_port.trim_matches(['[', ']']).to_lowercase()
+
+    // A bracketed IPv6 literal is full of colons, so the port has to be found after the
+    // closing bracket rather than at the last colon.
+    if let Some(inner) = after_userinfo.strip_prefix('[')
+        && let Some(end) = inner.find(']')
+    {
+        return inner[..end].to_lowercase();
+    }
+
+    match after_userinfo.find(':') {
+        Some(i) => after_userinfo[..i].to_lowercase(),
+        None => after_userinfo.to_lowercase(),
+    }
 }
 
 /// Forem's `no_local` option: a bare hostname with no dot, a `.local` name, or a loopback address.
 fn is_local_host(host: &str) -> bool {
-    LOCAL_HOSTS.contains(&host) || host.ends_with(".local") || !host.contains('.')
+    if LOCAL_HOSTS.contains(&host) || host.ends_with(".local") {
+        return true;
+    }
+    // An IPv6 literal has no dots but is not a bare intranet hostname either.
+    if host.contains(':') {
+        return false;
+    }
+    !host.contains('.')
 }
 
 /// The three video hosts `Api::ArticlesController#article_params` will permit, as the
@@ -148,6 +162,60 @@ mod tests {
         ));
         assert!(!is_permitted_video_source("https://vimeo.com/123"));
         assert!(!is_permitted_video_source("https://youtube.com/shorts/abc"));
+    }
+
+    /// A scheme is letters, digits, `+`, `-` and `.`. Anything else in that position means
+    /// the string is not an absolute URL at all, whatever follows the `://`.
+    #[test]
+    fn the_scheme_charset_decides_whether_this_is_a_url() {
+        assert!(check("svn+ssh://example.com", &["svn+ssh"], false).is_empty());
+        assert!(check("view-source://example.com", &["view-source"], false).is_empty());
+        assert!(check("x.y://example.com", &["x.y"], false).is_empty());
+
+        for not_a_url in [
+            "ht tp://example.com",
+            "://example.com",
+            "ht_tp://example.com",
+            "https:/example.com",
+            "example.com",
+        ] {
+            assert!(
+                check(not_a_url, &WEB, false).contains(&UrlIssue::BadScheme),
+                "{not_a_url} should not parse as a web URL"
+            );
+        }
+    }
+
+    /// A string with no usable scheme is not a URL, so the check stops there rather than
+    /// also passing judgement on a host it never parsed. One problem, not two.
+    #[test]
+    fn a_bad_scheme_stops_the_check_before_the_host_is_judged() {
+        assert_eq!(
+            check("://localhost/x", &WEB, true),
+            vec![UrlIssue::BadScheme]
+        );
+        assert_eq!(
+            check("ht_tp://localhost/x", &WEB, true),
+            vec![UrlIssue::BadScheme]
+        );
+    }
+
+    #[test]
+    fn the_scheme_comparison_ignores_case() {
+        assert!(check("HTTPS://example.com", &WEB, false).is_empty());
+    }
+
+    #[test]
+    fn a_url_with_no_host_is_reported_as_such() {
+        assert!(check("https:///path", &WEB, false).contains(&UrlIssue::NoHost));
+    }
+
+    /// A bracketed IPv6 literal is all colons, so the port cannot be found at the last one.
+    #[test]
+    fn an_ipv6_literal_keeps_its_address_and_is_not_local() {
+        assert!(check("https://[2001:db8::1]/x", &WEB, true).is_empty());
+        assert!(check("https://[2001:db8::1]:8443/x", &WEB, true).is_empty());
+        assert!(check("https://[::1]/x", &WEB, true).contains(&UrlIssue::LocalHost));
     }
 
     fn any_url_ish(tc: &hegel::TestCase) -> String {
