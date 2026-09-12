@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      # Runs fmt, clippy -D warnings, the suite, and cargo mutants to zero survivors.
+      # CI=1 is exported by the script itself so the property tests derandomize: with
+      # random draws a mutation score means nothing.
+      - name: Gate
+        run: ./scripts/gate.sh
+        env:
+          JOBS: 4

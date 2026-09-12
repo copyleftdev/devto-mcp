@@ -4,6 +4,7 @@ use devto_client::{Clock, DevtoClient, Transport};
 use serde_json::{Value, json};
 
 use crate::config::Config;
+use crate::knowledge;
 use crate::protocol::{
     Era, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, MODERN_VERSION, PARSE_ERROR, Request,
     SUPPORTED_HANDSHAKE_VERSIONS, UNSUPPORTED_PROTOCOL_VERSION, error, error_with, failure,
@@ -114,6 +115,11 @@ impl<T: Transport, C: Clock> Server<T, C> {
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools::definitions() })),
             "tools/call" => self.call_tool(&request),
+            "resources/list" => Ok(json!({ "resources": knowledge::resource_list() })),
+            "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
+            "resources/read" => self.read_resource(&request),
+            "prompts/list" => Ok(json!({ "prompts": knowledge::prompt_list() })),
+            "prompts/get" => self.get_prompt(&request),
             other => Err(error(
                 METHOD_NOT_FOUND,
                 format!("this server does not implement {other}"),
@@ -174,7 +180,7 @@ impl<T: Transport, C: Clock> Server<T, C> {
         };
         json!({
             "protocolVersion": version,
-            "capabilities": { "tools": {} },
+            "capabilities": capabilities(),
             "serverInfo": server_info(),
             "instructions": INSTRUCTIONS,
         })
@@ -183,9 +189,40 @@ impl<T: Transport, C: Clock> Server<T, C> {
     fn discover(&self) -> Value {
         json!({
             "supportedVersions": supported_versions(),
-            "capabilities": { "tools": {} },
+            "capabilities": capabilities(),
             "serverInfo": server_info(),
             "instructions": INSTRUCTIONS,
+        })
+    }
+
+    fn read_resource(&self, request: &Request) -> Result<Value, crate::protocol::ErrorObject> {
+        let Some(uri) = request.param_str("uri") else {
+            return Err(error(INVALID_PARAMS, "resources/read requires a uri"));
+        };
+        knowledge::read_resource(uri).ok_or_else(|| {
+            error_with(
+                INVALID_PARAMS,
+                format!("no resource at {uri}"),
+                json!({ "available": knowledge::RESOURCES.iter().map(|r| r.uri).collect::<Vec<_>>() }),
+            )
+        })
+    }
+
+    fn get_prompt(&self, request: &Request) -> Result<Value, crate::protocol::ErrorObject> {
+        let Some(name) = request.param_str("name") else {
+            return Err(error(INVALID_PARAMS, "prompts/get requires a name"));
+        };
+        let arguments = request
+            .params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        knowledge::get_prompt(name, &arguments).ok_or_else(|| {
+            error_with(
+                INVALID_PARAMS,
+                format!("no prompt named {name}"),
+                json!({ "available": knowledge::PROMPTS.iter().map(|p| p.name).collect::<Vec<_>>() }),
+            )
         })
     }
 
@@ -217,6 +254,16 @@ impl<T: Transport, C: Clock> Server<T, C> {
             "isError": outcome.is_error,
         }))
     }
+}
+
+/// Declared in both `initialize` and `server/discover`. Listing a capability the server
+/// does not implement is worse than omitting one: the client advertises it to the model.
+fn capabilities() -> Value {
+    json!({
+        "tools": {},
+        "resources": {},
+        "prompts": {},
+    })
 }
 
 fn server_info() -> Value {
@@ -502,7 +549,7 @@ mod tests {
     fn an_unknown_method_is_a_method_not_found() {
         let response = respond(
             &mut offline(),
-            r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"sampling/createMessage"}"#,
         );
         assert_eq!(response["error"]["code"], json!(METHOD_NOT_FOUND));
     }
@@ -623,6 +670,126 @@ mod tests {
             json!(false),
             "a key alone must not grant publishing"
         );
+    }
+
+    // ---- resources and prompts -------------------------------------------------------
+
+    #[test]
+    fn the_server_declares_only_what_it_implements() {
+        let mut server = offline();
+        let response = respond(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let capabilities = &response["result"]["capabilities"];
+        for declared in ["tools", "resources", "prompts"] {
+            assert!(
+                capabilities[declared].is_object(),
+                "{declared} not declared"
+            );
+        }
+        // Nothing else: a client that is told about sampling or roots will try to use them.
+        assert_eq!(capabilities.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn resources_are_listed_and_read_by_uri() {
+        let mut server = offline();
+        let listed = respond(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#,
+        );
+        let resources = listed["result"]["resources"].as_array().unwrap();
+        assert_eq!(resources.len(), 4);
+        assert!(
+            resources
+                .iter()
+                .all(|r| r["mimeType"] == json!("text/markdown"))
+        );
+
+        let read = respond(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":2,"method":"resources/read",
+                "params":{"uri":"devto://liquid-tags"}}"#,
+        );
+        let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("{% embed"));
+        assert!(text.len() > 1000);
+    }
+
+    /// A URI the server does not have must be refused with the ones it does, not invented.
+    #[test]
+    fn an_unknown_resource_uri_is_refused_with_the_available_ones() {
+        let response = respond(
+            &mut offline(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"devto://nope"}}"#,
+        );
+        assert_eq!(response["error"]["code"], json!(INVALID_PARAMS));
+        let available = response["error"]["data"]["available"].as_array().unwrap();
+        assert!(available.contains(&json!("devto://governance")));
+    }
+
+    #[test]
+    fn resources_read_without_a_uri_is_a_parameter_error() {
+        let response = respond(
+            &mut offline(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{}}"#,
+        );
+        assert_eq!(response["error"]["code"], json!(INVALID_PARAMS));
+    }
+
+    #[test]
+    fn prompts_are_listed_and_filled_in() {
+        let mut server = offline();
+        let listed = respond(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list"}"#,
+        );
+        let prompts = listed["result"]["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts.iter().any(|p| p["name"] == json!("draft-post")));
+
+        let filled = respond(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":2,"method":"prompts/get",
+                "params":{"name":"draft-post","arguments":{"topic":"lock-free queues"}}}"#,
+        );
+        let text = filled["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("lock-free queues"));
+        assert!(!text.contains("{{topic}}"));
+    }
+
+    #[test]
+    fn an_unknown_prompt_is_refused_with_the_available_ones() {
+        let response = respond(
+            &mut offline(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"do-it-all"}}"#,
+        );
+        assert_eq!(response["error"]["code"], json!(INVALID_PARAMS));
+        let available = response["error"]["data"]["available"].as_array().unwrap();
+        assert!(available.contains(&json!("draft-post")));
+    }
+
+    #[test]
+    fn prompts_get_without_a_name_is_a_parameter_error() {
+        let response = respond(
+            &mut offline(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{}}"#,
+        );
+        assert_eq!(response["error"]["code"], json!(INVALID_PARAMS));
+    }
+
+    /// Clients ask for these during discovery; answering "method not found" makes the server
+    /// look broken when it simply has none.
+    #[test]
+    fn resource_templates_are_answered_with_an_empty_list() {
+        let response = respond(
+            &mut offline(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/templates/list"}"#,
+        );
+        assert_eq!(response["result"]["resourceTemplates"], json!([]));
     }
 
     /// The governance text is the point of the server, not decoration.

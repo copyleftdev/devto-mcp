@@ -2,7 +2,7 @@
   "mcpServers": {
     "devto": {
       "type": "stdio",
-      "command": "/home/ops/Project/devto-mcp/target/release/devto-mcp",
+      "command": "devto-mcp",
       "args": [],
       "env": {
         "DEVTO_API_KEY": "${DEVTO_API_KEY}"

@@ -5,6 +5,7 @@
 //! rather than a message, so diagnostics go to stderr.
 
 mod config;
+mod knowledge;
 mod protocol;
 mod server;
 mod tools;
