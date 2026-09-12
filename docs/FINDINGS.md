@@ -220,6 +220,10 @@ Three things only a live authenticated call settles. All confirmed against `copy
 
 And a behavioural one worth knowing before trusting the ranking: **semantic results are not sorted by `similarity`.** A live query returned similarities 0.7853, 0.7887, 0.7120 in that order, because the controller fuses keyword and vector rankings with Reciprocal Rank Fusion (k=60) and then applies recency and quality boosts. `similarity` is `1.0 - cosine_distance` and is reported per hit, but re-sorting by it throws the actual ranking away.
 
+**The write response disagrees with the listing responses about `tag_list`.** Verified live on 2026-09-12 by creating a draft: `POST /api/articles` replied with `"tag_list":"testing"` — a comma-joined **string** — for an article that `GET /api/articles/me/unpublished` reported moments later as `["testing"]`, an **array**. That makes three different spellings of an article's tags across the API: `tag_list` as an array on the listings, `tag_list` as a string on the write views, and `cached_tag_list` as a string on `semantic_search`. A client has to accept either shape on the write path.
+
+The same test exposed a failure mode worth designing against rather than merely handling: **a write can succeed while its reply fails to decode.** The article existed; only the response parse failed. A client that reports that as an error invites the caller to retry, and dev.to has no delete — so the second attempt leaves a permanent duplicate.
+
 ## 8. Rate limiting — two independent layers, and they are strict
 
 ### Layer 1 — Rack::Attack, at the edge (`config/initializers/rack_attack.rb`)

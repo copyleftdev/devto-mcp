@@ -325,6 +325,55 @@ mod tests {
         assert!(hit.similarity.is_none());
     }
 
+    /// Verified live on 2026-09-12: the view rendered after a write returns `tag_list` as a
+    /// comma-joined string, while every listing endpoint returns the same field as an
+    /// array. A client that assumes one shape fails on the other.
+    #[test]
+    fn a_write_response_accepts_either_tag_list_shape() {
+        let joined: WrittenArticle =
+            serde_json::from_str(r#"{"id":1,"tag_list":"rust, webdev"}"#).unwrap();
+        assert_eq!(joined.tag_list, vec!["rust", "webdev"]);
+
+        let array: WrittenArticle =
+            serde_json::from_str(r#"{"id":1,"tag_list":["rust","webdev"]}"#).unwrap();
+        assert_eq!(array.tag_list, vec!["rust", "webdev"]);
+
+        let single: WrittenArticle =
+            serde_json::from_str(r#"{"id":1,"tag_list":"testing"}"#).unwrap();
+        assert_eq!(single.tag_list, vec!["testing"]);
+
+        for empty in [
+            r#"{"id":1,"tag_list":""}"#,
+            r#"{"id":1,"tag_list":[]}"#,
+            r#"{"id":1,"tag_list":null}"#,
+            r#"{"id":1}"#,
+        ] {
+            let parsed: WrittenArticle = serde_json::from_str(empty).unwrap();
+            assert!(parsed.tag_list.is_empty(), "{empty}");
+        }
+    }
+
+    /// The exact body dev.to replied with when the write path was first exercised for real.
+    #[test]
+    fn the_live_create_response_decodes() {
+        let live = r#"{"type_of":"article","id":4640644,
+            "title":"devto-mcp transport check (unpublished test artifact)",
+            "description":"Transport verification for devto-mcp.","published":false,
+            "published_at":null,"slug":"devto-mcp-transport-check-4a1b",
+            "path":"/copyleftdev/devto-mcp-transport-check-4a1b",
+            "url":"https://dev.to/copyleftdev/devto-mcp-transport-check-4a1b",
+            "canonical_url":null,"tag_list":"testing",
+            "ai_disclosure_level":"fully_autonomous"}"#;
+        let parsed: WrittenArticle = serde_json::from_str(live).unwrap();
+        assert_eq!(parsed.id, 4640644);
+        assert!(!parsed.published);
+        assert_eq!(parsed.tag_list, vec!["testing"]);
+        assert_eq!(
+            parsed.ai_disclosure_level.as_deref(),
+            Some("fully_autonomous")
+        );
+    }
+
     /// Shaped from the live payload captured 2026-09-12.
     #[test]
     fn the_dashboard_totals_parse_as_forem_sends_them() {
@@ -372,4 +421,103 @@ mod tests {
         assert!(article.reading_time_minutes.is_none());
         assert!(article.tag_list.is_empty());
     }
+}
+
+/// What to send when creating or updating an article.
+///
+/// Every field is optional because an update is a partial write: what is omitted is left
+/// alone. `None` fields are not serialized at all — sending `null` would clear the value
+/// rather than leave it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ArticlePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_markdown: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
+    /// The API field. Front matter spells the same concept `cover_image`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub main_image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_disclosure_level: Option<String>,
+    /// RFC 3339. Absent from the published OpenAPI description, but accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_source_url: Option<String>,
+}
+
+impl ArticlePayload {
+    /// Forem expects the fields nested under an `article` key.
+    pub fn to_request_body(&self) -> String {
+        serde_json::json!({ "article": self }).to_string()
+    }
+}
+
+/// Accept a tag list however the endpoint chose to send it.
+///
+/// The listing endpoints return `tag_list` as an array. The view rendered after a create
+/// or update returns the same field as a **comma-joined string**. Verified live on
+/// 2026-09-12: `POST /api/articles` replied with `"tag_list":"testing"` for an article
+/// that `GET /api/articles/me/unpublished` then reported as `["testing"]`.
+fn tag_list_either_shape<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        List(Vec<String>),
+        Joined(String),
+    }
+
+    Ok(match Option::<Either>::deserialize(deserializer)? {
+        Some(Either::List(tags)) => tags,
+        Some(Either::Joined(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    })
+}
+
+/// What comes back from a create or update.
+///
+/// A different view from the listing endpoints, so everything is defaulted: the useful
+/// parts are the id and the URL, and a missing extra must not fail the whole write.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WrittenArticle {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub published: bool,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default, deserialize_with = "tag_list_either_shape")]
+    pub tag_list: Vec<String>,
+    #[serde(default)]
+    pub canonical_url: Option<String>,
+    #[serde(default)]
+    pub ai_disclosure_level: Option<String>,
 }

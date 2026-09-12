@@ -1,0 +1,21 @@
+[package]
+name = "devto-mcp"
+description = "An MCP server for authorship on DEV (dev.to), with the platform's rules built in"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "devto-mcp"
+path = "src/main.rs"
+
+[dependencies]
+devto-core = { path = "../devto-core" }
+devto-client = { path = "../devto-client" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hegeltest.workspace = true

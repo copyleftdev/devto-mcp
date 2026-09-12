@@ -31,10 +31,12 @@ pub mod finding;
 pub mod frontmatter;
 pub mod limits;
 pub mod tags;
+pub mod time;
 pub mod urls;
 pub mod validate;
 
 pub use draft::{AiDisclosure, ArticleType, Context, Draft, Operation, RecentTitle, UnixSeconds};
 pub use finding::{Field, Finding, Report, RuleId, Severity};
 pub use frontmatter::FrontMatter;
+pub use time::{format_rfc3339_utc, parse_rfc3339_utc};
 pub use validate::validate;

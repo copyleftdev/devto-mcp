@@ -107,6 +107,12 @@ impl<T: Transport, C: Clock> DevtoClient<T, C> {
         self.limiter.budget(self.clock.now_millis())
     }
 
+    /// The transport this client was built with. Useful to a caller that supplied its own
+    /// and wants to inspect what was asked of it.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     pub fn cache_stats(&self) -> (u64, u64) {
         (self.cache.hits, self.cache.misses)
     }
@@ -224,6 +230,42 @@ impl<T: Transport, C: Clock> DevtoClient<T, C> {
         qs.push_opt("organization_id", organization_id);
         let path = format!("/api/analytics/dashboard{}", qs.finish());
         self.get_json(&path, Ttl::NONE, "analytics/dashboard")
+    }
+
+    // ---- writes ----------------------------------------------------------------------
+
+    /// Create an article. One write out of a budget of one per second.
+    pub fn create_article(&mut self, payload: &ArticlePayload) -> Result<WrittenArticle> {
+        self.write_json(Method::Post, "/api/articles", payload, "create article")
+    }
+
+    /// Update an article. A partial write: omitted fields are left as they are.
+    pub fn update_article(&mut self, id: i64, payload: &ArticlePayload) -> Result<WrittenArticle> {
+        self.write_json(
+            Method::Put,
+            &format!("/api/articles/{id}"),
+            payload,
+            "update article",
+        )
+    }
+
+    fn write_json(
+        &mut self,
+        method: Method,
+        path: &str,
+        payload: &ArticlePayload,
+        context: &str,
+    ) -> Result<WrittenArticle> {
+        let response = self.send(method, path, Some(payload.to_request_body()))?;
+        // Anything cached is now potentially a lie about this account's articles.
+        self.cache.clear();
+        serde_json::from_str(&response.body).map_err(|source| Error::Decode {
+            // The write already happened: dev.to accepted it and answered. Saying so
+            // matters, because a caller that reads this as a failure will send it again
+            // and end up with two articles.
+            context: format!("{context} (the write succeeded; only its reply was unreadable)"),
+            source,
+        })
     }
 
     // ---- pipeline --------------------------------------------------------------------
@@ -679,6 +721,137 @@ mod tests {
         c.analytics_dashboard(None, None, None, None).unwrap();
         c.analytics_dashboard(None, None, None, None).unwrap();
         assert_eq!(c.transport.seen.borrow().len(), 2);
+    }
+
+    // ---- writes ----------------------------------------------------------------------
+
+    const CREATED: &str = r#"{"id":7,"title":"T","published":false,"url":"https://dev.to/x/t"}"#;
+
+    #[test]
+    fn a_write_nests_its_fields_under_an_article_key() {
+        let mut c = client(vec![MockTransport::ok(CREATED)]);
+        c.create_article(&ArticlePayload {
+            title: Some("A title".into()),
+            body_markdown: Some("Body.".into()),
+            published: Some(false),
+            tags: Some(vec!["rust".into()]),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let seen = c.transport.seen.borrow();
+        assert_eq!(seen[0].method, Method::Post);
+        assert_eq!(seen[0].url, "https://dev.to/api/articles");
+
+        let body: serde_json::Value =
+            serde_json::from_str(seen[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["article"]["title"], "A title");
+        assert_eq!(body["article"]["published"], false);
+        assert_eq!(body["article"]["tags"], serde_json::json!(["rust"]));
+    }
+
+    /// An update is a partial write. A field left as `None` must not appear at all —
+    /// sending it as null would clear the value rather than leave it alone.
+    #[test]
+    fn absent_fields_are_omitted_rather_than_sent_as_null() {
+        let mut c = client(vec![MockTransport::ok(CREATED)]);
+        c.update_article(
+            7,
+            &ArticlePayload {
+                title: Some("New title".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seen = c.transport.seen.borrow();
+        assert_eq!(seen[0].method, Method::Put);
+        assert_eq!(seen[0].url, "https://dev.to/api/articles/7");
+
+        let raw = seen[0].body.as_deref().unwrap();
+        assert!(raw.contains("New title"));
+        assert!(!raw.contains("null"), "a partial update sent nulls: {raw}");
+        assert!(!raw.contains("body_markdown"));
+    }
+
+    #[test]
+    fn a_write_declares_a_json_body() {
+        let mut c = client(vec![MockTransport::ok(CREATED)]);
+        c.create_article(&ArticlePayload::default()).unwrap();
+        let seen = c.transport.seen.borrow();
+        assert!(
+            seen[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Content-Type" && v == "application/json")
+        );
+    }
+
+    /// A write draws on a different budget from a read, and a much smaller one.
+    #[test]
+    fn a_write_spends_the_write_budget_not_the_read_budget() {
+        let mut c = client(vec![MockTransport::ok(CREATED)]);
+        let before = c.budget();
+        c.create_article(&ArticlePayload::default()).unwrap();
+        let after = c.budget();
+
+        assert_eq!(after.writes_this_second, before.writes_this_second - 1);
+        assert_eq!(after.reads_this_minute, before.reads_this_minute);
+    }
+
+    /// Anything cached before a write is now potentially a lie about this account.
+    #[test]
+    fn a_write_invalidates_everything_that_was_cached() {
+        let mut c = client(vec![
+            MockTransport::ok("[]"),
+            MockTransport::ok(CREATED),
+            MockTransport::ok("[]"),
+        ]);
+        c.tags(None, None).unwrap();
+        assert_eq!(c.transport.seen.borrow().len(), 1);
+
+        c.create_article(&ArticlePayload::default()).unwrap();
+
+        c.tags(None, None).unwrap();
+        assert_eq!(
+            c.transport.seen.borrow().len(),
+            3,
+            "the cached read survived a write"
+        );
+    }
+
+    #[test]
+    fn a_rejected_write_surfaces_forems_own_sentence() {
+        let mut c = client(vec![MockTransport::status(
+            422,
+            r#"{"error":"Tag is invalid","status":422}"#,
+        )]);
+        match c.create_article(&ArticlePayload::default()) {
+            Err(Error::Validation { message }) => assert_eq!(message, "Tag is invalid"),
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    /// A decode failure after a write is the dangerous case: the article exists, and a
+    /// caller who reads this as "it failed" will create a second one.
+    #[test]
+    fn a_write_whose_reply_is_unreadable_says_the_write_still_happened() {
+        let mut c = client(vec![MockTransport::ok("not json at all")]);
+        match c.create_article(&ArticlePayload::default()) {
+            Err(Error::Decode { context, .. }) => {
+                assert!(context.contains("the write succeeded"), "{context}");
+            }
+            other => panic!("expected a decode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_write_response_parses_even_when_it_is_sparse() {
+        let mut c = client(vec![MockTransport::ok(r#"{"id":7}"#)]);
+        let written = c.create_article(&ArticlePayload::default()).unwrap();
+        assert_eq!(written.id, 7);
+        assert!(!written.published);
+        assert!(written.tag_list.is_empty());
     }
 
     // ---- urls ------------------------------------------------------------------------

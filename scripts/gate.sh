@@ -27,6 +27,12 @@ echo "== mutants =="
 # crates/devto-client/src/net.rs is the ureq + wall-clock adapter. Nothing in it can be
 # killed by a unit test, which is exactly why it is kept as thin as possible and excluded
 # here rather than allowed to sit in the survivor list forever.
-cargo mutants -j "$JOBS" --timeout 90 --exclude 'crates/devto-client/src/net.rs'
+# Two files are excluded, both for the same reason: nothing in them can be killed by a
+# unit test, and both are kept deliberately thin because of it.
+#   net.rs  — the ureq and wall-clock adapter behind the Transport/Clock traits.
+#   main.rs — the stdio read/write loop around Server::handle_line.
+cargo mutants -j "$JOBS" --timeout 90 \
+    --exclude 'crates/devto-client/src/net.rs' \
+    --exclude 'crates/devto-mcp/src/main.rs'
 
 echo "== gate passed =="
