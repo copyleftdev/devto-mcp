@@ -30,4 +30,7 @@ jobs:
       - name: Gate
         run: ./scripts/gate.sh
         env:
-          JOBS: 4
+          # Two concurrent mutants on a four-core runner. Four leaves each mutant test
+          # roughly one core, which is what pushed the slowest ones past the old timeout.
+          JOBS: 2
+          MUTANT_TIMEOUT: 600
