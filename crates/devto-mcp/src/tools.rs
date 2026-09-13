@@ -85,7 +85,7 @@ fn annotations(name: &str) -> Value {
         }
         // Reads that go to dev.to.
         "whoami" | "my_articles" | "get_article" | "search_articles" | "read_comments"
-        | "my_analytics" | "list_tags" => read_only(true),
+        | "my_analytics" | "list_tags" | "check_tag_fit" => read_only(true),
 
         "create_draft" => writes(false, false),
         "update_article" => writes(true, true),
@@ -164,12 +164,16 @@ fn api_definitions() -> Vec<Value> {
             "description":
                 "List articles belonging to the authenticated account. This is the only way to \
                  see unpublished work — drafts are not reachable by URL or by any public \
-                 endpoint. Includes page view counts, which no public listing carries.",
+                 endpoint, and `get_article` returns 404 for them. Includes page view counts, \
+                 which no public listing carries.\n\n\
+                 Pass include_body to get the markdown too. That is how a draft reaches the \
+                 text tools and check_tag_fit: there is no other route to its prose.",
             "inputSchema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
                     "status": {"type": "string", "enum": ["published", "unpublished", "all"], "description": "Default all."},
+                    "include_body": {"type": "boolean", "description": "Include each article's markdown. Off by default because a full listing of bodies is enormous — but this is the only way to read an unpublished draft, which get_article cannot fetch."},
                     "page": {"type": "integer", "minimum": 1},
                     "per_page": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Default 30."}
                 },
@@ -385,6 +389,41 @@ fn api_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "check_tag_fit",
+            "title": "Check candidate tags against the live taxonomy",
+            "description":
+                "Measure the tags you are considering against dev.to's own taxonomy, before \
+                 they are spent. An article gets four tag slots and they drive nearly all of \
+                 its discovery, and nothing on dev.to tells you when one is wasted.\n\n\
+                 What only this can tell you: whether the tag *exists*. dev.to creates a tag \
+                 on demand rather than rejecting it, so an invented tag looks like it worked \
+                 and quietly reaches nobody. Measured across one author's 100 published \
+                 articles, 24 of 311 tag slots had gone to tags that are not in the taxonomy \
+                 at all.\n\n\
+                 Also reports reach — position in the taxonomy is the only such signal the \
+                 API offers, as it carries no article or follower counts — and, when other \
+                 candidates are given, how often those tags actually appear together on real \
+                 articles. Two tags with heavy overlap are buying one audience with two \
+                 slots.\n\n\
+                 It reports; it does not choose. Costs up to 13 requests the first time in a \
+                 day and nothing after that, plus one per tag if overlap is measured.",
+            "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The tags you are considering. More than four is fine — that is what it is for."
+                    },
+                    "body_markdown": {"type": "string", "description": "Optional. Checks whether the article's prose actually uses each tag's term."},
+                    "measure_overlap": {"type": "boolean", "description": "Sample recent articles per tag to measure how often the candidates co-occur. One request per tag. Default false."}
+                },
+                "required": ["tags"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "list_tags",
             "title": "Browse the tag taxonomy",
             "description": format!(
@@ -449,6 +488,7 @@ pub fn call<T: devto_client::Transport, C: devto_client::Clock>(
         "read_comments" => read_comments(args, ctx),
         "my_analytics" => my_analytics(args, ctx),
         "list_tags" => list_tags(args, ctx),
+        "check_tag_fit" => check_tag_fit(args, ctx),
         name if crate::text_tools::is_text_tool(name) => text_tool(name, args, ctx),
         "create_draft" => create_draft(args, ctx),
         "update_article" => update_article(args, ctx),
@@ -690,6 +730,10 @@ fn my_articles<T: devto_client::Transport, C: devto_client::Clock>(
     if let Some(outcome) = require_auth(ctx) {
         return outcome;
     }
+    let include_body = args
+        .get("include_body")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let status = match args.get("status").and_then(Value::as_str) {
         Some("published") => MyArticleStatus::Published,
         Some("unpublished") => MyArticleStatus::Unpublished,
@@ -715,6 +759,9 @@ fn my_articles<T: devto_client::Transport, C: devto_client::Clock>(
                         "page_views": a.page_views_count,
                         "reactions": a.public_reactions_count,
                         "comments": a.comments_count,
+                        // Only when asked: a hundred articles' markdown is a very large reply,
+                        // and most callers want the listing rather than the corpus.
+                        "body_markdown": include_body.then(|| a.body_markdown.clone()).flatten(),
                         "reading_time_minutes": a.reading_time_minutes,
                         "canonical_url": a.canonical_url,
                     })
@@ -950,6 +997,239 @@ fn my_analytics<T: devto_client::Transport, C: devto_client::Clock>(
         })),
         Err(error) => client_failure(error),
     }
+}
+
+/// Letters and digits only, downcased.
+///
+/// dev.to tags carry no separators, so `machinelearning` is what an article about "machine
+/// learning" would be tagged. Comparing the two as written finds nothing; comparing them
+/// squashed finds what is actually there.
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Where a tag sits in a taxonomy of this size, said in words rather than a bare number.
+///
+/// The bands are deliberately coarse. Rank is a live figure that moves, and the difference
+/// between 30th and 40th is noise, while the difference between 30th and 900th is the whole
+/// decision.
+fn reach_band(rank: usize, total: usize) -> &'static str {
+    match rank {
+        1..=50 => "front page of the taxonomy — the largest audiences on the site",
+        51..=200 => "well established, a real audience",
+        201..=500 => "a modest but genuine following",
+        _ if rank <= total => "long tail — few readers follow this",
+        _ => "unranked",
+    }
+}
+
+fn check_tag_fit<T: devto_client::Transport, C: devto_client::Clock>(
+    args: &Value,
+    ctx: &mut ToolContext<'_, T, C>,
+) -> ToolOutcome {
+    let Some(given) = args.get("tags").and_then(Value::as_array) else {
+        return ToolOutcome::failed(
+            "tags is required",
+            "Pass the tags you are considering, as an array of strings.",
+        );
+    };
+    if given.is_empty() {
+        return ToolOutcome::failed("no tags to check", "Pass at least one candidate tag.");
+    }
+
+    // Forem's own normalisation first, so what is looked up is what would be stored — a
+    // comma inside one entry becomes two tags, and everything is downcased.
+    let raw: Vec<String> = given
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let normalized = devto_core::tags::normalize(&raw);
+
+    let taxonomy = match ctx.client.all_tags() {
+        Ok(tags) => tags,
+        Err(error) => return client_failure(error),
+    };
+    let rank_of: std::collections::HashMap<&str, usize> = taxonomy
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.name.as_str(), i + 1))
+        .collect();
+    let total = taxonomy.len();
+
+    // Tags are concatenated where prose is not: an article about machine learning says
+    // "machine learning", and looking for "machinelearning" in it finds nothing. Squashing
+    // both sides to letters and digits is what makes the comparison mean anything.
+    let body = args
+        .get("body_markdown")
+        .and_then(Value::as_str)
+        .map(|markdown| squash(&devto_text::Document::parse(markdown).prose));
+
+    let mut reports = Vec::new();
+    let mut missing = Vec::new();
+    for tag in &normalized {
+        let rank = rank_of.get(tag.value.as_str()).copied();
+        let mut notes: Vec<String> = Vec::new();
+
+        match rank {
+            Some(position) => {
+                if position > 500 {
+                    notes.push(format!(
+                        "Rank {position} of {total}: this spends a slot on a tag almost nobody follows."
+                    ));
+                }
+            }
+            None => {
+                missing.push(tag.value.clone());
+                notes.push(
+                    "Not in the taxonomy. dev.to will create it on publish rather than \
+                     refusing it, so this will look like it worked and reach nobody."
+                        .to_string(),
+                );
+            }
+        }
+
+        let invalid = devto_core::tags::invalid_characters(&tag.value);
+        if !invalid.is_empty() {
+            notes.push(format!(
+                "Contains {invalid:?}, which Forem does not allow in a tag."
+            ));
+        }
+        if devto_core::tags::is_too_long(&tag.value) {
+            notes.push("Longer than a tag may be.".to_string());
+        }
+        // Compared as written, not lowercased on both sides: doing that hid the very change
+        // the note is about, so it only ever fired when quotes had been stripped.
+        if tag.raw != tag.value {
+            notes.push(format!(
+                "Stored as {:?}, not {:?} — Forem downcases every tag and strips quotes.",
+                tag.value, tag.raw
+            ));
+        }
+
+        // Does the article actually talk about this? A tag the prose never mentions is
+        // either mis-chosen or the piece has buried its subject.
+        let grounding = body.as_ref().map(|prose| {
+            let occurrences = prose.matches(&squash(&tag.value)).count();
+            if occurrences == 0 {
+                notes.push(format!(
+                    "The prose never uses the word {:?}. That is not fatal, but it is worth \
+                     knowing before spending a slot on it.",
+                    tag.value
+                ));
+            }
+            json!({ "occurrences_in_prose": occurrences })
+        });
+
+        reports.push(json!({
+            "given": tag.raw,
+            "tag": tag.value,
+            "exists": rank.is_some(),
+            "rank": rank,
+            "reach": rank.map(|r| reach_band(r, total)),
+            "grounding": grounding,
+            "notes": notes,
+        }));
+    }
+
+    let slots = devto_core::limits::MAX_TAGS;
+    let mut payload = json!({
+        "taxonomy": {
+            "tags": total,
+            "ordered_by": "popularity, which is the only reach signal the API carries — it \
+                           reports no article counts and no follower counts",
+        },
+        "slots": {
+            "available": slots,
+            "candidates": reports.len(),
+        },
+        "tags": reports,
+        "not_in_taxonomy": missing,
+    });
+
+    if reports.len() > slots {
+        payload["slots"]["note"] = json!(format!(
+            "An article gets {slots} tags. {} candidates means choosing, and the ranks above \
+             are what that choice is made on.",
+            reports.len()
+        ));
+    }
+
+    if args
+        .get("measure_overlap")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        payload["overlap"] = measure_overlap(&normalized, ctx);
+    }
+
+    ToolOutcome::ok(payload)
+}
+
+/// How often each pair of candidates actually appears together on real articles.
+///
+/// One listing request per tag, then the overlap is counted from the tag lists that come
+/// back. This is a sample of what dev.to returns for each tag now, not a census — the sample
+/// size is reported so the number can be weighed rather than taken.
+fn measure_overlap<T: devto_client::Transport, C: devto_client::Clock>(
+    tags: &[devto_core::tags::NormalizedTag],
+    ctx: &mut ToolContext<'_, T, C>,
+) -> Value {
+    use std::collections::{HashMap, HashSet};
+
+    let mut seen: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut sampled: HashMap<String, usize> = HashMap::new();
+    for tag in tags {
+        let query = devto_client::ArticleQuery {
+            tag: Some(tag.value.as_str()),
+            per_page: Some(100),
+            ..Default::default()
+        };
+        let Ok(articles) = ctx.client.articles(query) else {
+            continue;
+        };
+        sampled.insert(tag.value.clone(), articles.len());
+        let mut companions = HashSet::new();
+        for article in &articles {
+            for other in &article.tag_list {
+                companions.insert(other.to_lowercase());
+            }
+        }
+        seen.insert(tag.value.clone(), companions);
+    }
+
+    let mut pairs = Vec::new();
+    for (i, a) in tags.iter().enumerate() {
+        for b in tags.iter().skip(i + 1) {
+            let (Some(from_a), Some(n)) = (seen.get(&a.value), sampled.get(&a.value)) else {
+                continue;
+            };
+            if *n == 0 {
+                continue;
+            }
+            if from_a.contains(&b.value) {
+                pairs.push(json!({
+                    "pair": [a.value, b.value],
+                    "co_occurs": true,
+                    "sampled_articles": n,
+                    "note": format!(
+                        "{:?} appears alongside {:?} in the {n} most recent articles carrying it. \
+                         Two slots, one audience.",
+                        a.value, b.value
+                    ),
+                }));
+            }
+        }
+    }
+
+    json!({
+        "method": "Up to 100 recent articles per tag, counting which other tags they carry. \
+                   A sample of what is published now, not a census.",
+        "pairs": pairs,
+    })
 }
 
 fn list_tags<T: devto_client::Transport, C: devto_client::Clock>(
@@ -1400,6 +1680,315 @@ fn client_failure(error: ClientError) -> ToolOutcome {
 mod tests {
     use super::*;
 
+    /// A draft's markdown is only reachable here. `get_article` 404s on anything
+    /// unpublished, so without this the text tools cannot see a draft at all — which is
+    /// exactly when they are worth running.
+    #[test]
+    fn a_draft_body_is_available_but_only_when_asked_for() {
+        // `r##"…"##`, because the markdown starts with a heading and `"#` would close an
+        // `r#"…"#` literal right there.
+        const DRAFT: &str = r##"[{"id":7,"title":"A draft","published":false,
+            "tag_list":["ai"],"body_markdown":"# Heading\n\nSome prose.","url":"u",
+            "slug":"s","path":"p"}]"##;
+
+        let (quiet, _) = invoke("my_articles", json!({"status": "unpublished"}), &[DRAFT]);
+        assert_eq!(quiet["articles"][0]["id"], json!(7));
+        assert_eq!(
+            quiet["articles"][0]["body_markdown"],
+            Value::Null,
+            "a listing does not carry bodies by default"
+        );
+
+        let (full, _) = invoke(
+            "my_articles",
+            json!({"status": "unpublished", "include_body": true}),
+            &[DRAFT],
+        );
+        assert_eq!(
+            full["articles"][0]["body_markdown"],
+            json!("# Heading\n\nSome prose."),
+            "asked for, the markdown is there: {}",
+            full["articles"][0]
+        );
+    }
+
+    /// Every band, at both edges. A band that returns a constant, or an arm that is deleted,
+    /// only shows up if the boundaries either side of it are checked.
+    #[test]
+    fn every_reach_band_is_distinct_and_bounded() {
+        let total = 1285;
+        for (rank, expected) in [
+            (1, "front page"),
+            (50, "front page"),
+            (51, "well established"),
+            (200, "well established"),
+            (201, "modest"),
+            (500, "modest"),
+            (501, "long tail"),
+            (total, "long tail"),
+        ] {
+            assert!(
+                reach_band(rank, total).contains(expected),
+                "rank {rank} of {total} gave {:?}, wanted {expected:?}",
+                reach_band(rank, total)
+            );
+        }
+        assert_eq!(
+            reach_band(total + 1, total),
+            "unranked",
+            "a rank past the end of the taxonomy is not a band"
+        );
+
+        let bands: std::collections::HashSet<&str> = [1, 51, 201, 501, total + 1]
+            .into_iter()
+            .map(|r| reach_band(r, total))
+            .collect();
+        assert_eq!(bands.len(), 5, "the bands have to say different things");
+    }
+
+    /// Rank 500 is a real following and 501 is the tail. The note fires on one side only.
+    #[test]
+    fn the_long_tail_warning_starts_where_the_band_does() {
+        let names: Vec<String> = (1..=600).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let page = taxonomy(&refs);
+
+        let (ok, _) = invoke("check_tag_fit", json!({"tags": ["t500"]}), &[&page]);
+        assert_eq!(ok["tags"][0]["rank"], json!(500));
+        assert!(
+            ok["tags"][0]["notes"].as_array().unwrap().is_empty(),
+            "rank 500 is still a real audience: {}",
+            ok["tags"][0]["notes"]
+        );
+
+        let (tail, _) = invoke("check_tag_fit", json!({"tags": ["t501"]}), &[&page]);
+        assert!(
+            tail["tags"][0]["notes"][0]
+                .as_str()
+                .unwrap()
+                .contains("almost nobody follows"),
+            "{}",
+            tail["tags"][0]["notes"]
+        );
+    }
+
+    /// The rules devto-core already enforces are reported here too, because a tag that will
+    /// be rejected is worth knowing about before its reach is discussed.
+    #[test]
+    fn a_tag_forem_would_mangle_is_reported() {
+        let page = taxonomy(&["rust"]);
+
+        let (spaced, _) = invoke("check_tag_fit", json!({"tags": ["bad tag"]}), &[&page]);
+        assert!(
+            spaced["tags"][0]["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("does not allow")),
+            "{}",
+            spaced["tags"][0]["notes"]
+        );
+
+        // Quoting and casing both change what is stored, and both are worth saying.
+        let (cased, _) = invoke("check_tag_fit", json!({"tags": ["Rust"]}), &[&page]);
+        assert_eq!(cased["tags"][0]["tag"], json!("rust"));
+        assert!(
+            cased["tags"][0]["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("downcases")),
+            "a change of case has to be reported: {}",
+            cased["tags"][0]["notes"]
+        );
+    }
+
+    /// Four candidates fit; five do not. The note is about the slot budget, so it turns on
+    /// exactly at the boundary.
+    #[test]
+    fn the_slot_note_appears_only_past_four() {
+        let page = taxonomy(&["a", "b", "c", "d", "e"]);
+        let (four, _) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["a","b","c","d"]}),
+            &[&page],
+        );
+        assert!(four["slots"].get("note").is_none(), "four is not too many");
+
+        let (five, _) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["a","b","c","d","e"]}),
+            &[&page],
+        );
+        assert!(five["slots"]["note"].is_string(), "five is");
+    }
+
+    /// Overlap is measured from real listings, one request per tag, and a pair is reported
+    /// only when the articles carrying one tag actually carry the other.
+    #[test]
+    fn overlap_is_measured_from_the_articles_that_carry_each_tag() {
+        let page = taxonomy(&["ai", "rust"]);
+        // Articles tagged `ai` also carry `rust`; articles tagged `rust` carry only `rust`.
+        let ai_articles =
+            r#"[{"id":1,"title":"x","tag_list":["ai","rust"],"url":"u","path":"p","slug":"s"}]"#;
+        let rust_articles =
+            r#"[{"id":2,"title":"y","tag_list":["rust"],"url":"u","path":"p","slug":"s"}]"#;
+
+        let (result, urls) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["ai", "rust"], "measure_overlap": true}),
+            &[&page, ai_articles, rust_articles],
+        );
+
+        let pairs = result["overlap"]["pairs"].as_array().unwrap();
+        assert_eq!(pairs.len(), 1, "one pair, not a self-pair: {pairs:?}");
+        assert_eq!(pairs[0]["pair"], json!(["ai", "rust"]));
+        assert_eq!(pairs[0]["sampled_articles"], json!(1));
+
+        // The query has to name the tag and ask for a sample worth counting.
+        let listing: Vec<&String> = urls
+            .iter()
+            .filter(|u| u.contains("/api/articles?"))
+            .collect();
+        assert_eq!(listing.len(), 2, "one request per tag: {urls:?}");
+        assert!(listing[0].contains("tag=ai"), "{}", listing[0]);
+        assert!(listing[0].contains("per_page=100"), "{}", listing[0]);
+    }
+
+    /// A tag nobody has published under yields no pair rather than a division by nothing.
+    #[test]
+    fn a_tag_with_no_articles_produces_no_overlap() {
+        let page = taxonomy(&["ai", "obscure"]);
+        let (result, _) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["ai", "obscure"], "measure_overlap": true}),
+            &[&page, "[]", "[]"],
+        );
+        assert!(
+            result["overlap"]["pairs"].as_array().unwrap().is_empty(),
+            "{}",
+            result["overlap"]["pairs"]
+        );
+    }
+
+    /// One page of taxonomy, shortest first so the walk stops after a single request.
+    fn taxonomy(names: &[&str]) -> String {
+        let rows: Vec<String> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!(r#"{{"id":{},"name":"{n}"}}"#, i + 1))
+            .collect();
+        format!("[{}]", rows.join(","))
+    }
+
+    /// The finding this tool exists for: dev.to creates a tag on demand rather than
+    /// refusing it, so an invented tag looks like it worked and reaches nobody.
+    #[test]
+    fn a_tag_outside_the_taxonomy_is_named_as_such() {
+        let tags = taxonomy(&["webdev", "ai", "rust"]);
+        let (result, _) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["rust", "devsecops"]}),
+            &[&tags],
+        );
+
+        let reported = result["tags"].as_array().unwrap();
+        assert_eq!(reported[0]["tag"], json!("rust"));
+        assert_eq!(reported[0]["exists"], json!(true));
+        assert_eq!(reported[0]["rank"], json!(3));
+
+        assert_eq!(reported[1]["tag"], json!("devsecops"));
+        assert_eq!(reported[1]["exists"], json!(false));
+        assert_eq!(reported[1]["rank"], Value::Null);
+        assert!(
+            reported[1]["notes"][0]
+                .as_str()
+                .unwrap()
+                .contains("create it on publish"),
+            "the silent failure has to be spelled out: {}",
+            reported[1]["notes"][0]
+        );
+        assert_eq!(result["not_in_taxonomy"], json!(["devsecops"]));
+    }
+
+    /// Tags are concatenated and prose is not. An article about machine learning never
+    /// contains the string "machinelearning", so comparing them as written finds nothing.
+    #[test]
+    fn grounding_matches_a_concatenated_tag_against_spaced_prose() {
+        let tags = taxonomy(&["machinelearning", "rust"]);
+        let (result, _) = invoke(
+            "check_tag_fit",
+            json!({
+                "tags": ["machinelearning", "rust"],
+                "body_markdown": "This piece is about machine learning, at length and in detail."
+            }),
+            &[&tags],
+        );
+        let reported = result["tags"].as_array().unwrap();
+        assert_eq!(
+            reported[0]["grounding"]["occurrences_in_prose"],
+            json!(1),
+            "spaced prose should ground the concatenated tag"
+        );
+        assert_eq!(
+            reported[1]["grounding"]["occurrences_in_prose"],
+            json!(0),
+            "and a tag the article never discusses should say so"
+        );
+        assert!(
+            reported[1]["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("never uses the word")),
+            "{}",
+            reported[1]["notes"]
+        );
+    }
+
+    /// Forem's normalisation runs before the lookup, so what is checked is what would be
+    /// stored: a comma inside one entry is two tags, and everything is downcased.
+    #[test]
+    fn candidates_are_normalised_the_way_forem_will_store_them() {
+        let tags = taxonomy(&["rust", "zig"]);
+        let (result, _) = invoke("check_tag_fit", json!({"tags": ["Rust,ZIG"]}), &[&tags]);
+        let reported = result["tags"].as_array().unwrap();
+        assert_eq!(reported.len(), 2, "one entry, two tags: {result}");
+        assert_eq!(reported[0]["tag"], json!("rust"));
+        assert_eq!(reported[1]["tag"], json!("zig"));
+        assert!(reported[0]["exists"].as_bool().unwrap(), "{result}");
+    }
+
+    /// Four slots is the constraint the whole tool is about.
+    #[test]
+    fn more_candidates_than_slots_is_called_out() {
+        let tags = taxonomy(&["a", "b", "c", "d", "e"]);
+        let (few, _) = invoke("check_tag_fit", json!({"tags": ["a", "b"]}), &[&tags]);
+        assert!(few["slots"].get("note").is_none(), "two fits in four");
+
+        let (many, _) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["a", "b", "c", "d", "e"]}),
+            &[&tags],
+        );
+        assert_eq!(many["slots"]["available"], json!(4));
+        assert_eq!(many["slots"]["candidates"], json!(5));
+        assert!(
+            many["slots"]["note"].as_str().unwrap().contains("choosing"),
+            "{}",
+            many["slots"]["note"]
+        );
+    }
+
+    /// Overlap costs a request per tag, so it is off unless asked for.
+    #[test]
+    fn overlap_is_not_measured_unless_requested() {
+        let tags = taxonomy(&["ai", "rust"]);
+        let (quiet, urls) = invoke("check_tag_fit", json!({"tags": ["ai", "rust"]}), &[&tags]);
+        assert!(quiet.get("overlap").is_none());
+        assert_eq!(urls.len(), 1, "only the taxonomy was read: {urls:?}");
+    }
+
     /// A session that never met the old API says nothing about it.
     ///
     /// `served_by_v0_api` is a diagnostic, and a diagnostic that appears when there is
@@ -1518,7 +2107,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_name_a_description_and_a_bundled_schema() {
         let definitions = definitions();
-        assert_eq!(definitions.len(), 15);
+        assert_eq!(definitions.len(), 16);
 
         for tool in &definitions {
             let name = tool["name"].as_str().expect("name");

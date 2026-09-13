@@ -109,6 +109,7 @@ themselves sets the variable and the claim goes through.
 - `my_articles` — the only way to reach your own drafts.
 - `get_article` · `read_comments` · `list_tags` · `my_analytics`
 - `search_articles` — `feed`, `keyword`, or `semantic` in one tool.
+- `check_tag_fit` — do these tags exist, how far do they reach, does the article support them.
 
 **Writing** — validated locally first, so a rejection costs no request
 

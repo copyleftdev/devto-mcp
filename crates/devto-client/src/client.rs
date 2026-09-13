@@ -218,6 +218,33 @@ impl<T: Transport, C: Clock> DevtoClient<T, C> {
         self.get_json(&format!("/api/tags{}", qs.finish()), Ttl::DAY, "tags")
     }
 
+    /// The whole tag taxonomy, in the order dev.to returns it — which is by popularity.
+    ///
+    /// There is no way to ask about one tag: `/api/tags/{name}` is a 404 and a `name=` query
+    /// is ignored, so establishing that a tag does *not* exist means reading every page. It
+    /// is roughly 1,300 tags over 13 requests, cached for a day, and that cost is why this is
+    /// a separate call rather than something every tool does quietly.
+    ///
+    /// Position is the only reach signal the API offers: the response carries no article
+    /// count and no follower count. Rank 1 is `webdev`; the far tail is `putters`.
+    pub fn all_tags(&mut self) -> Result<Vec<Tag>> {
+        const PER_PAGE: u32 = 100;
+        // dev.to stops returning rows rather than reporting a total, so the end is an empty
+        // page. The ceiling is a guard against paging forever if that ever changes.
+        const MAX_PAGES: u32 = 40;
+
+        let mut all = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let batch = self.tags(Some(page), Some(PER_PAGE))?;
+            let short = batch.len() < PER_PAGE as usize;
+            all.extend(batch);
+            if short {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     pub fn followed_tags(&mut self) -> Result<Vec<FollowedTag>> {
         self.get_json("/api/follows/tags", Ttl::DAY, "follows/tags")
     }
@@ -622,6 +649,44 @@ mod tests {
             ["/api/users/me"],
             "and the endpoint is remembered"
         );
+    }
+
+    /// The taxonomy walk stops on a short page, so it takes two pages to prove it walks at
+    /// all — and the boundary matters: a full page must not be mistaken for the last one.
+    #[test]
+    fn the_taxonomy_walk_continues_until_a_page_comes_back_short() {
+        fn page(n: usize, from: usize) -> String {
+            let rows: Vec<String> = (0..n)
+                .map(|i| format!(r#"{{"id":{},"name":"t{}"}}"#, from + i, from + i))
+                .collect();
+            format!("[{}]", rows.join(","))
+        }
+
+        // Exactly one full page, then a partial one. A `<=` here would stop after the first.
+        let full = page(100, 1);
+        let partial = page(3, 101);
+        let mut c = client(vec![MockTransport::ok(&full), MockTransport::ok(&partial)]);
+
+        let tags = c.all_tags().expect("walks");
+        assert_eq!(tags.len(), 103, "both pages, in order");
+        assert_eq!(
+            tags[0].name, "t1",
+            "rank 1 is the first row of the first page"
+        );
+        assert_eq!(tags[102].name, "t103");
+        assert_eq!(
+            c.transport().seen.borrow().len(),
+            2,
+            "a full page is not the end"
+        );
+    }
+
+    /// A first page that is already short is the whole taxonomy, and costs one request.
+    #[test]
+    fn a_short_first_page_ends_the_walk() {
+        let mut c = client(vec![MockTransport::ok(r#"[{"id":1,"name":"webdev"}]"#)]);
+        assert_eq!(c.all_tags().expect("walks").len(), 1);
+        assert_eq!(c.transport().seen.borrow().len(), 1);
     }
 
     /// A response with no deprecation warning records nothing. Without this the list would

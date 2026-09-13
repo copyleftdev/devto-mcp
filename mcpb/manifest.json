@@ -55,6 +55,10 @@
       "description": "Heading hierarchy, paragraph lengths, how much of the article is code, link density, and which liquid tags it uses. Answ"
     },
     {
+      "name": "check_tag_fit",
+      "description": "Measure the tags you are considering against dev.to's own taxonomy, before they are spent. An article gets four tag slot"
+    },
+    {
       "name": "create_draft",
       "description": "Create a new article on dev.to as an unpublished draft. Never publishes \u2014 publishing is a separate, separately-permitted"
     },

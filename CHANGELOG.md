@@ -16,7 +16,10 @@ in so a rejection costs no request.
 - `whoami` — account, permissions, remaining rate budget
 
 **Reading** — `my_articles` (the only route to your own drafts), `get_article`,
-`read_comments`, `list_tags`, `my_analytics`, `search_articles`
+`read_comments`, `list_tags`, `my_analytics`, `search_articles`, and `check_tag_fit`, which
+measures candidate tags against the live taxonomy: whether they exist at all, how far they
+reach, whether the article's own prose supports them, and whether two of them are buying the
+same audience twice
 
 **Writing** — `create_draft`, `update_article`, `publish_article`, `unpublish_article`, each
 validated locally first
