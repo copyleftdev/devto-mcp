@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "devto-mcp",
   "display_name": "DEV (dev.to) authorship",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Write for dev.to with its rules checked offline, and score the prose rather than the code.",
   "long_description": "An MCP server for authorship on DEV (dev.to). Every rule the platform enforces is checked offline first, so a rejection costs no API request, and the text tools measure the prose rather than the code \u2014 each score arrives with the share of the document it was computed over. The metrics reproduce Python textstat 0.7.13 byte-for-byte over 58 documents, hyphenation matches pyphen over 20,854 words, and the reading time matches what dev.to itself reports on 30 published articles.",
   "author": {

@@ -12,9 +12,9 @@ name = "devto-mcp"
 path = "src/main.rs"
 
 [dependencies]
-devto-core = { path = "../devto-core", version = "0.1.0" }
-devto-client = { path = "../devto-client", version = "0.1.0" }
-devto-text = { path = "../devto-text", version = "0.1.0" }
+devto-core = { path = "../devto-core", version = "0.2.0" }
+devto-client = { path = "../devto-client", version = "0.2.0" }
+devto-text = { path = "../devto-text", version = "0.2.0" }
 serde.workspace = true
 serde_json.workspace = true
 

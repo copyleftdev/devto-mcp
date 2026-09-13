@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "devto-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devto-core",
  "hegeltest",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "devto-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hegeltest",
  "serde",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "devto-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devto-client",
  "devto-core",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "devto-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fst",
  "hegeltest",

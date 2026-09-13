@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.2.0
+
+### `check_tag_fit`
+
+An article gets four tags and they drive nearly all of its discovery. dev.to creates a tag on
+demand rather than refusing one it has never seen, so an invented tag looks exactly like a
+working one and reaches nobody — and nothing on the platform says otherwise. Across one
+author's 100 published articles, **24 of 311 tag slots** had gone to tags that are not in the
+taxonomy at all.
+
+The tool reports what only a server with both halves can know: whether the tag exists in the
+1,285-tag taxonomy, where it ranks (position is the only reach signal the API carries — there
+are no article or follower counts), whether the article's own prose actually uses the term,
+and how often two candidates appear together on real articles. Two tags with heavy overlap
+are buying one audience with two slots.
+
+It reports and does not choose, the same rule the text tools follow.
+
+### Fixed
+
+- **Draft bodies were unreachable.** `my_articles` discarded `body_markdown`, which the API
+  does send for unpublished work, and `get_article` returns 404 for a draft. That left the
+  text tools unable to see a draft at all — exactly when they are worth running. Now behind
+  `include_body`, because a hundred articles' markdown is an enormous reply.
+- **A tag note fired for the wrong reason.** "Forem downcases every tag" compared
+  `raw.to_lowercase()` against the stored value, which hides the change it describes; it could
+  only ever trigger when quotes had been stripped.
+- **Releases shipped an unlabelled binary.** v0.1.0 published a `devto-mcp` asset with no
+  platform in its name, and it was Mach-O x86_64. Four targets build a file with that exact
+  name and the release job collected the raw artifacts alongside the packaged ones. The job
+  now takes only archives and the bundle, and refuses to publish anything else.
+- **Intel macOS builds never ran.** `macos-13` was retired on 2025-12-04; a retired label does
+  not fail, it queues forever, so the release never reached its publish step. Now
+  `macos-15-intel`, and every job has a timeout so the next retirement fails loudly.
+
 ## 0.1.0
 
 First release. An MCP server for authorship on DEV (dev.to), with the platform's rules built
