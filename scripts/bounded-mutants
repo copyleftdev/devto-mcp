@@ -24,11 +24,18 @@
 #
 # The cgroup scope is the part that actually protects the machine. The rest is cooperation.
 #
+#
+# TMPDIR is pointed at real disk. On this box /tmp is tmpfs, so cargo-mutants' per-job copies
+# of the workspace — one build tree each — are resident memory that RLIMIT_AS cannot see and
+# that counts against the cgroup's memory limit. Eight jobs holding a Rust target directory
+# apiece is how a 32 GiB cap got hit while the compilers themselves were nowhere near it.
+#
 # Env:
 #   MUTANT_CPU_BUDGET   cores to use (default: a quarter of nproc, at least 2)
 #   MUTANT_MEM_BUDGET   systemd MemoryHigh, the throttle (default: 4G per core, capped at a
 #                       quarter of RAM)
 #   MUTANT_MEM_MAX      systemd MemoryMax, the hard kill ceiling (default: half of RAM)
+#   MUTANT_TMPDIR       scratch directory (default: <repo>/target/mutants-tmp, on disk)
 #   MUTANT_NO_CGROUP=1  skip the systemd scope (for hosts without a delegated cpu controller)
 set -eu
 
@@ -58,6 +65,18 @@ fi
 # both budgets getting there.
 REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 LOCK="${TMPDIR:-/tmp}/bounded-mutants-$(printf '%s' "$REPO" | md5sum | cut -c1-16).lock"
+
+# Scratch on real disk, for the reason in the header. Created under the repo's own target
+# directory so it is cleaned by `cargo clean` and never crosses a filesystem boundary.
+if [ -z "${MUTANT_TMPDIR:-}" ]; then
+    MUTANT_TMPDIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/target/mutants-tmp"
+fi
+mkdir -p "$MUTANT_TMPDIR"
+if [ "$(stat -f -c %T "$MUTANT_TMPDIR" 2>/dev/null)" = "tmpfs" ]; then
+    echo "bounded-mutants: warning — scratch at $MUTANT_TMPDIR is tmpfs, so build trees will" >&2
+    echo "                 be held in RAM. Set MUTANT_TMPDIR to a real-disk path." >&2
+fi
+export TMPDIR="$MUTANT_TMPDIR"
 
 export RUST_TEST_THREADS=1
 # Let the jobserver be the single authority on build parallelism.
