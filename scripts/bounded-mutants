@@ -84,6 +84,14 @@ export RUST_TEST_THREADS=1
 # Let the jobserver be the single authority on build parallelism.
 unset CARGO_BUILD_JOBS || true
 
+# CARGO_TARGET_DIR must not survive into the sweep. cargo-mutants copies the tree once per
+# job and relies on each copy having its own build directory; pointing them all at one shared
+# target dir makes them reuse each other's artifacts, and a mutant then gets tested against a
+# binary built from different source. That does not fail loudly — it reports the mutant as
+# MISSED. Caught on 2026-09-13: a mutation that fails two tests by hand was called a survivor,
+# and the only difference was this variable being set.
+unset CARGO_TARGET_DIR || true
+
 # cargo-mutants warns above 8: each job is a whole `cargo` process, and their fixed overhead
 # is not something the jobserver can cap. Build parallelism stays at the full budget; only
 # the number of concurrent cargo processes is held down.
