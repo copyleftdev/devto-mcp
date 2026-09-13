@@ -249,6 +249,16 @@ API.
 limit topology, and what the API cannot do. Every claim is cited to a Forem source location
 or a live capture.
 
+## Privacy Policy
+
+This server runs on your machine and collects nothing. It writes no files, keeps its response
+cache in memory only, and sends nothing anywhere except HTTPS requests to the DEV instance you
+configure. Your API key is read from the environment, held in memory, sent only to DEV as an
+`api-key` header, and never written or printed — the startup line reports whether a key is
+present, never its value. The four offline tools make no network request at all.
+
+Full policy: [PRIVACY.md](PRIVACY.md).
+
 ## License
 
 MIT or Apache-2.0, at your option.

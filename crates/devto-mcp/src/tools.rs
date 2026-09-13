@@ -42,7 +42,58 @@ const TAG_RULE: &str = "Tags are letters and digits only, at most 30 characters 
 pub fn definitions() -> Vec<Value> {
     let mut all = api_definitions();
     all.extend(crate::text_tools::definitions());
+    for tool in &mut all {
+        let name = tool["name"]
+            .as_str()
+            .expect("every tool is named")
+            .to_string();
+        tool["annotations"] = annotations(&name);
+    }
     all
+}
+
+/// Behaviour hints for one tool, as the MCP specification defines them.
+///
+/// They are attached here rather than beside each definition so that no tool can be added
+/// without one — the table is exhaustive and the test below fails on a missing arm.
+///
+/// `readOnlyHint` means the call changes nothing. `destructiveHint` only carries meaning when
+/// it does, and it is set for the three calls whose effect cannot simply be undone:
+///
+/// - `update_article` overwrites a body, and the API offers no way back to the old one.
+/// - `publish_article` puts a post in front of readers, in feeds and in RSS. `unpublish` hides
+///   it again but cannot un-send that.
+/// - `unpublish_article` takes a public post away from the people reading it.
+///
+/// `create_draft` is deliberately *not* destructive: it destroys nothing. It is still not
+/// idempotent, because dev.to has no delete and calling it twice leaves two articles behind.
+fn annotations(name: &str) -> Value {
+    let read_only = |open_world: bool| json!({ "readOnlyHint": true, "idempotentHint": true, "openWorldHint": open_world });
+    let writes = |destructive: bool, idempotent: bool| {
+        json!({
+            "readOnlyHint": false,
+            "destructiveHint": destructive,
+            "idempotentHint": idempotent,
+            "openWorldHint": true
+        })
+    };
+
+    match name {
+        // Offline: no network, no rate budget, nothing outside this process.
+        "validate_draft" | "analyze_readability" | "analyze_structure" | "forem_reading_time" => {
+            read_only(false)
+        }
+        // Reads that go to dev.to.
+        "whoami" | "my_articles" | "get_article" | "search_articles" | "read_comments"
+        | "my_analytics" | "list_tags" => read_only(true),
+
+        "create_draft" => writes(false, false),
+        "update_article" => writes(true, true),
+        "publish_article" => writes(true, true),
+        "unpublish_article" => writes(true, true),
+
+        other => unreachable!("no annotations for {other}: add an arm when adding a tool"),
+    }
 }
 
 fn api_definitions() -> Vec<Value> {
@@ -1294,6 +1345,63 @@ fn client_failure(error: ClientError) -> ToolOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Claude connector directory rejects a tool without a behaviour hint, and a client
+    /// cannot warn about a write it was never told about. `annotations` is exhaustive, so a
+    /// tool added without an arm panics rather than shipping silently unannotated — this
+    /// checks the panic never reaches a user by exercising every definition.
+    #[test]
+    fn every_tool_declares_what_it_does() {
+        for tool in definitions() {
+            let name = tool["name"].as_str().expect("named");
+            let a = &tool["annotations"];
+            assert!(a.is_object(), "{name} has no annotations");
+            assert!(
+                tool["title"].as_str().is_some_and(|t| !t.is_empty()),
+                "{name} has no title"
+            );
+
+            let read_only = a["readOnlyHint"].as_bool().expect("readOnlyHint");
+            if read_only {
+                assert!(
+                    a.get("destructiveHint").is_none(),
+                    "{name} is read-only, so destructiveHint says nothing"
+                );
+            } else {
+                assert!(
+                    a["destructiveHint"].is_boolean(),
+                    "{name} writes, so it must say whether that is destructive"
+                );
+            }
+            assert!(
+                a["openWorldHint"].is_boolean(),
+                "{name} has no openWorldHint"
+            );
+        }
+    }
+
+    /// The four offline tools are the reason the validator costs nothing to run. If one of
+    /// them ever reaches the network, this is the test that should fail.
+    #[test]
+    fn the_offline_tools_stay_offline() {
+        let offline = [
+            "validate_draft",
+            "analyze_readability",
+            "analyze_structure",
+            "forem_reading_time",
+        ];
+        for tool in definitions() {
+            let name = tool["name"].as_str().expect("named");
+            let open_world = tool["annotations"]["openWorldHint"]
+                .as_bool()
+                .expect("openWorldHint");
+            assert_eq!(
+                open_world,
+                !offline.contains(&name),
+                "{name} disagrees with the offline list"
+            );
+        }
+    }
 
     #[test]
     fn every_tool_has_a_name_a_description_and_a_bundled_schema() {

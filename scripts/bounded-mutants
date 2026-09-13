@@ -66,8 +66,10 @@ fi
 REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 LOCK="${TMPDIR:-/tmp}/bounded-mutants-$(printf '%s' "$REPO" | md5sum | cut -c1-16).lock"
 
-# Scratch on real disk, for the reason in the header. Created under the repo's own target
-# directory so it is cleaned by `cargo clean` and never crosses a filesystem boundary.
+# Scratch on real disk, for the reason in the header. Kept under the repo's own target/ so it
+# is git-ignored and on the same filesystem as the checkout. Note this is not necessarily the
+# directory cargo builds into — CARGO_TARGET_DIR may point elsewhere — so `cargo clean` is not
+# guaranteed to remove it; the sweep cleans up after itself, and MUTANT_TMPDIR overrides.
 if [ -z "${MUTANT_TMPDIR:-}" ]; then
     MUTANT_TMPDIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/target/mutants-tmp"
 fi
