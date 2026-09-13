@@ -1,0 +1,101 @@
+name: Release
+
+# Prebuilt binaries, because the audience for an MCP server is people who want to register
+# one — not people who want to install a Rust toolchain first. The binary is self-contained:
+# CMUdict and the hyphenation patterns are compiled in, so there is nothing to fetch at
+# runtime and nothing to configure but the API key.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  ext: "" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: "" }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      ext: "" }
+          - { os: macos-13,       target: x86_64-apple-darwin,       ext: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p devto-mcp
+
+      # The one thing worth checking on every platform: that it starts, speaks the handshake,
+      # and lists its tools. A binary that builds and cannot be registered is not a release.
+      - name: Smoke-test the binary
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/devto-mcp${{ matrix.ext }}"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | "$BIN" > out.jsonl
+          grep -q '"serverInfo"' out.jsonl || { echo "no initialize result"; cat out.jsonl; exit 1; }
+          grep -q '"validate_draft"' out.jsonl || { echo "no tools listed"; cat out.jsonl; exit 1; }
+          echo "handshake and tools/list ok on ${{ matrix.target }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          NAME="devto-mcp-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp "target/${{ matrix.target }}/release/devto-mcp${{ matrix.ext }}" "dist/$NAME/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$NAME/"
+          cd dist
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            7z a "$NAME.zip" "$NAME"
+          else
+            tar czf "$NAME.tar.gz" "$NAME"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

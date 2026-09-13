@@ -41,6 +41,16 @@ returns no `X-RateLimit-*` headers at all, so the budget is modelled locally and
 
 ## Install
 
+A prebuilt binary, from the [latest release](https://github.com/copyleftdev/devto-mcp/releases/latest)
+— it needs no toolchain and nothing at runtime, because the datasets are compiled in:
+
+```sh
+tar xzf devto-mcp-<version>-<target>.tar.gz
+install -m755 devto-mcp-<version>-<target>/devto-mcp ~/.local/bin/
+```
+
+Or from source, which needs Rust 1.85 or newer:
+
 ```sh
 cargo install --git https://github.com/copyleftdev/devto-mcp devto-mcp
 ```
