@@ -112,7 +112,8 @@ jobs:
           cp mcpb/launchers/launch.sh bundle/server/linux/
           cp mcpb/launchers/launch.sh bundle/server/darwin/
           chmod +x bundle/server/linux/* bundle/server/darwin/* 
-          cp README.md LICENSE-MIT LICENSE-APACHE bundle/
+          cp README.md LICENSE-MIT LICENSE-APACHE PRIVACY.md bundle/
+          cp mcpb/icon.png bundle/icon.png
           jq --arg v "$VERSION" '.version = $v' mcpb/manifest.json > bundle/manifest.json
           npx -y @anthropic-ai/mcpb@latest validate bundle/manifest.json
 

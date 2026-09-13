@@ -68,6 +68,27 @@ jobs:
       - name: manifest.json against the MCPB schema
         run: npx -y @anthropic-ai/mcpb@latest validate mcpb/manifest.json
 
+      # The icon is shipped, so it is checked: the file the manifest names has to exist, be
+      # a real PNG, and be the square 512 the bundle format asks for. A broken icon is not
+      # noticed until a reviewer opens the submission.
+      - name: The icon is the size and shape it claims
+        run: |
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          import json, sys
+          from PIL import Image
+          manifest = json.load(open("mcpb/manifest.json"))
+          name = manifest.get("icon")
+          if not name:
+              print("manifest declares no icon", file=sys.stderr); sys.exit(1)
+          im = Image.open(f"mcpb/{name}")
+          if im.format != "PNG":
+              print(f"{name} is {im.format}, not PNG", file=sys.stderr); sys.exit(1)
+          if im.size != (512, 512):
+              print(f"{name} is {im.size[0]}x{im.size[1]}, want 512x512", file=sys.stderr); sys.exit(1)
+          print(f"{name}: {im.size[0]}x{im.size[1]} PNG")
+          PY
+
       # The bundle declares the tools it provides; the server is the authority on that list.
       - name: The declared tools are the tools the server serves
         run: |
