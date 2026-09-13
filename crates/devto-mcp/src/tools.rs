@@ -292,7 +292,15 @@ fn api_definitions() -> Vec<Value> {
                     }
                 },
                 "required": ["title", "body_markdown", "ai_disclosure_level"],
-                "additionalProperties": false
+                "additionalProperties": false,
+                // `draft_from_args` is shared with validate_draft, which does take these.
+                // Refused here rather than quietly dropped: a caller asking to publish should
+                // be told the tool will not, not handed a draft and left to assume it did.
+                "x-refused": {
+                    "published": "create_draft only ever creates a draft. Publish it afterwards with publish_article.",
+                    "publish_in_seconds": "create_draft cannot schedule. Create the draft, then publish_article takes publish_at.",
+                    "published_at_unix": "create_draft cannot schedule. Create the draft, then publish_article takes publish_at."
+                }
             }
         }),
         json!({
@@ -309,6 +317,8 @@ fn api_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "article_id": {"type": "integer"},
+                    "published_at_unix": {"type": "integer", "description": "dev.to discards this on an already-published article. The tool warns rather than pretending it took."},
+                    "publish_in_seconds": {"type": "integer", "description": "Alternative to published_at_unix, relative to now. Same caveat once published."},
                     "title": {"type": "string"},
                     "body_markdown": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": TAG_RULE},
@@ -323,7 +333,10 @@ fn api_definitions() -> Vec<Value> {
                     }
                 },
                 "required": ["article_id"],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "x-refused": {
+                    "published": "update_article cannot publish or unpublish. Use publish_article or unpublish_article, which carry their own permissions."
+                }
             }
         }),
         json!({
@@ -411,6 +424,22 @@ pub fn call<T: devto_client::Transport, C: devto_client::Clock>(
     args: &Value,
     ctx: &mut ToolContext<'_, T, C>,
 ) -> ToolOutcome {
+    // Hold the call to the schema the tool published. Without this the declaration is a
+    // suggestion: a misspelled argument is dropped and a value outside its enum falls through
+    // to a default, so the caller gets a confident answer to a question it did not ask.
+    if let Some(problems) = argument_problems(name, args) {
+        // The problems go in the remedy, not the error: the error says what happened and the
+        // remedy says what to do about it, and here every word of the "what to do" is in the
+        // problems themselves.
+        return ToolOutcome::failed(
+            format!("{name} was called with arguments it does not accept"),
+            format!(
+                "{}\nNothing was sent to dev.to, so this cost no rate budget.",
+                problems.join("\n")
+            ),
+        );
+    }
+
     match name {
         "validate_draft" => validate_draft(args, ctx.now_unix),
         "whoami" => whoami(ctx),
@@ -430,6 +459,18 @@ pub fn call<T: devto_client::Transport, C: devto_client::Clock>(
             format!("Call one of: {}.", names().join(", ")),
         ),
     }
+}
+
+/// Every way `args` fails the schema `name` publishes, or `None` when it passes.
+///
+/// An unknown tool returns `None` so that the dispatch below keeps ownership of that message;
+/// there is one place that knows what to say about a name it does not have.
+fn argument_problems(name: &str, args: &Value) -> Option<Vec<String>> {
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d["name"].as_str() == Some(name))?;
+    let problems = crate::schema::validate(&definition["inputSchema"], args);
+    (!problems.is_empty()).then_some(problems)
 }
 
 // ---- free -----------------------------------------------------------------------------
@@ -623,6 +664,19 @@ fn whoami<T: devto_client::Transport, C: devto_client::Clock>(
                 "joined_at": me.joined_at,
                 "followers_count": me.followers_count,
             });
+            // Which endpoints this session found on the old API. Three of them always are,
+            // whatever `Accept` says, and the figures they return are the older contract's —
+            // worth knowing when a number looks off, and not worth failing a call over.
+            let v0 = ctx.client.v0_paths();
+            if !v0.is_empty() {
+                payload["served_by_v0_api"] = json!({
+                    "paths": v0,
+                    "note": "dev.to has no V1 form of these endpoints and stamps every \
+                             response with the deprecation warning regardless of the request. \
+                             The bodies are the same either way; this is reported rather than \
+                             treated as a failure."
+                });
+            }
             ToolOutcome::ok(payload)
         }
         Err(error) => client_failure(error),
@@ -1346,6 +1400,64 @@ fn client_failure(error: ClientError) -> ToolOutcome {
 mod tests {
     use super::*;
 
+    /// A session that never met the old API says nothing about it.
+    ///
+    /// `served_by_v0_api` is a diagnostic, and a diagnostic that appears when there is
+    /// nothing wrong is worse than none: the usual answer is silence. The recording itself
+    /// is pinned in devto-client, where the warning header can be injected.
+    #[test]
+    fn whoami_mentions_the_old_api_only_when_it_met_it() {
+        const ME: &str =
+            r#"{"id":1,"username":"u","name":"U","joined_at":"Jan 1, 2020","followers_count":0}"#;
+        let (result, _) = invoke("whoami", json!({}), &[ME]);
+        assert_eq!(result["authenticated"], json!(true));
+        assert!(
+            result.get("served_by_v0_api").is_none(),
+            "nothing was served by V0, so nothing should be reported: {result}"
+        );
+    }
+
+    /// No schema may use a keyword the validator does not enforce.
+    ///
+    /// Silently ignoring a constraint is exactly the bug this validation exists to fix, and a
+    /// keyword nobody implements is the quietest way to reintroduce it: the schema says
+    /// `"minLength": 3`, clients believe it, and nothing checks. Adding one to a tool means
+    /// adding it to the validator, and this fails until that happens.
+    #[test]
+    fn no_schema_uses_a_keyword_the_validator_ignores() {
+        fn walk(node: &Value, path: &str, unknown: &mut Vec<String>) {
+            let Some(object) = node.as_object() else {
+                return;
+            };
+            for (key, value) in object {
+                if !crate::schema::SUPPORTED.contains(&key.as_str()) {
+                    unknown.push(format!("{path}.{key}"));
+                }
+                match key.as_str() {
+                    // These hold argument names, not keywords; the values under `properties`
+                    // are themselves schemas, the ones under `x-refused` are prose.
+                    "properties" => {
+                        for (name, sub) in value.as_object().into_iter().flatten() {
+                            walk(sub, &format!("{path}.{name}"), unknown);
+                        }
+                    }
+                    "x-refused" | "required" | "enum" => {}
+                    _ => walk(value, &format!("{path}.{key}"), unknown),
+                }
+            }
+        }
+
+        let mut unknown = Vec::new();
+        for tool in definitions() {
+            let name = tool["name"].as_str().unwrap().to_string();
+            walk(&tool["inputSchema"], &name, &mut unknown);
+        }
+        assert!(
+            unknown.is_empty(),
+            "these schema keywords are declared but never enforced: {unknown:?}"
+        );
+    }
+
     /// The Claude connector directory rejects a tool without a behaviour hint, and a client
     /// cannot warn about a write it was never told about. `annotations` is exhaustive, so a
     /// tool added without an arm panics rather than shipping silently unannotated — this
@@ -1830,9 +1942,17 @@ mod tests {
                 urls[0]
             );
         }
-        // An unrecognised status falls back to everything rather than to nothing.
-        let (_, urls) = invoke("my_articles", json!({"status": "nonsense"}), &["[]"]);
-        assert!(urls[0].ends_with("/api/articles/me/all"));
+        // An unrecognised status is refused rather than quietly widened. It used to fall
+        // through to "all", which answers a question nobody asked: a caller that mistypes
+        // "published" gets every draft back and no indication anything went wrong.
+        let (result, urls) = invoke("my_articles", json!({"status": "nonsense"}), &["[]"]);
+        assert!(urls.is_empty(), "a refused call must not spend a request");
+        let remedy = result["remedy"].as_str().unwrap();
+        assert!(remedy.contains("\"nonsense\""), "{remedy}");
+        assert!(
+            remedy.contains("published"),
+            "it should list what is allowed: {remedy}"
+        );
     }
 
     #[test]
@@ -2004,11 +2124,7 @@ mod tests {
     /// A draft is a draft. There is no argument that makes create_draft publish.
     #[test]
     fn a_created_draft_is_always_unpublished() {
-        let mut args = draft_args();
-        args["published"] = json!(true);
-        args["publish_in_seconds"] = json!(0);
-
-        let (_, _, sent) = invoke_as(restrictive(), "create_draft", args, &[WRITE_OK]);
+        let (_, _, sent) = invoke_as(restrictive(), "create_draft", draft_args(), &[WRITE_OK]);
         let (method, body) = &sent[0];
         assert_eq!(method, "POST");
         let payload: Value = serde_json::from_str(body).unwrap();
@@ -2017,6 +2133,29 @@ mod tests {
             payload["article"].get("published_at").is_none(),
             "a draft carries no publication time: {body}"
         );
+    }
+
+    /// Asking it to publish anyway is refused, and said out loud.
+    ///
+    /// These arguments used to be accepted and dropped, because the draft builder is shared
+    /// with `validate_draft`, which does take them. Silence was the wrong answer: a caller
+    /// that passes `published: true` and gets a success back has every reason to believe its
+    /// article is live.
+    #[test]
+    fn create_draft_refuses_an_argument_that_would_publish() {
+        for forbidden in ["published", "publish_in_seconds", "published_at_unix"] {
+            let mut args = draft_args();
+            args[forbidden] = json!(1);
+
+            let (result, urls, sent) = invoke_as(restrictive(), "create_draft", args, &[WRITE_OK]);
+            assert!(urls.is_empty(), "{forbidden} must not reach the network");
+            assert!(sent.is_empty(), "{forbidden} must not send anything");
+            let remedy = result["remedy"].as_str().unwrap();
+            assert!(
+                remedy.contains("publish_article"),
+                "{forbidden} should point at the tool that does publish: {remedy}"
+            );
+        }
     }
 
     #[test]

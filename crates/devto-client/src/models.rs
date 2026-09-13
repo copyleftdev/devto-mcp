@@ -100,7 +100,10 @@ pub struct ArticleSummary {
     pub cover_image: Option<String>,
     #[serde(default)]
     pub canonical_url: Option<String>,
-    #[serde(default)]
+    /// Either shape: the listings send an array, `GET /api/articles/{id}` sends a
+    /// comma-joined string. Found by reading a real article — the decode failed on
+    /// `"cybersecurity, discuss, security"` where a sequence was expected.
+    #[serde(default, deserialize_with = "tag_list_either_shape")]
     pub tag_list: Vec<String>,
     #[serde(default)]
     pub published_at: Option<String>,

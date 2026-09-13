@@ -74,6 +74,13 @@ pub struct DevtoClient<T: Transport = UreqTransport, C: Clock = SystemClock> {
     clock: C,
     limiter: RateLimiter,
     cache: ResponseCache,
+    /// Paths dev.to served from the V0 API, in the order first seen.
+    ///
+    /// Not an error. Three endpoints — `/api/articles/{id}`, `/api/articles` and
+    /// `/api/comments` — carry Forem's `Warning: 299` whatever `Accept` you send, because
+    /// they have no V1 variant to serve. Verified against dev.to on 2026-09-13, with the V1
+    /// header present and the response identical in shape either way.
+    v0_paths: Vec<String>,
 }
 
 impl DevtoClient<UreqTransport, SystemClock> {
@@ -83,6 +90,11 @@ impl DevtoClient<UreqTransport, SystemClock> {
 }
 
 impl<T: Transport, C: Clock> DevtoClient<T, C> {
+    /// Endpoints this session found on the deprecated V0 API. Empty is the usual answer.
+    pub fn v0_paths(&self) -> &[String] {
+        &self.v0_paths
+    }
+
     pub fn with_parts(config: Config, transport: T, clock: C) -> Self {
         Self {
             config,
@@ -90,6 +102,7 @@ impl<T: Transport, C: Clock> DevtoClient<T, C> {
             clock,
             limiter: RateLimiter::new(),
             cache: ResponseCache::new(),
+            v0_paths: Vec::new(),
         }
     }
 
@@ -362,11 +375,16 @@ impl<T: Transport, C: Clock> DevtoClient<T, C> {
         headers
     }
 
-    fn interpret(&self, response: HttpResponse, path: &str) -> Result<HttpResponse> {
-        // Checked before the status, because a 200 from the deprecated API is the failure
-        // this catches: the call appears to work and quietly returns the wrong contract.
-        if response.is_v0_response() {
-            return Err(Error::VersionDowngrade);
+    fn interpret(&mut self, response: HttpResponse, path: &str) -> Result<HttpResponse> {
+        // Recorded, not refused. This used to return `VersionDowngrade` on the reasoning that
+        // the `Accept` header must have been stripped in transit — which turned out to be
+        // wrong, and made `get_article`, `read_comments` and the article feed unusable against
+        // the real dev.to. Those three endpoints stamp `Warning: 299` no matter what you send
+        // because they have no V1 form, and the body they return is the same either way. The
+        // signal is still worth keeping, so it is reported through `whoami` instead of
+        // throwing away a working response.
+        if response.is_v0_response() && !self.v0_paths.iter().any(|p| p == path) {
+            self.v0_paths.push(path.to_string());
         }
 
         match response.status {
@@ -582,16 +600,68 @@ mod tests {
         );
     }
 
-    /// A 200 from the deprecated API is the dangerous case: it looks like success.
+    /// A V0 response is recorded and reported, not refused.
+    ///
+    /// It used to be an error, on the reasoning that Forem stamps `Warning: 299` only when
+    /// the `Accept` header went missing. That is not so: `/api/articles/{id}`,
+    /// `/api/articles` and `/api/comments` stamp it however you ask, because they have no V1
+    /// form — checked against dev.to on 2026-09-13 with the header present, and the body is
+    /// the same either way. Treating it as fatal broke three working read tools, so the
+    /// signal is surfaced through `whoami` and the response is used.
     #[test]
-    fn a_v0_response_is_an_error_even_when_it_succeeds() {
+    fn a_v0_response_is_recorded_and_still_returned() {
         let warning = "299 - This endpoint is part of the V0 (beta) API.";
         let mut c = client(vec![MockTransport::with_header(
             MockTransport::ok(ME),
             "warning",
             warning,
         )]);
-        assert!(matches!(c.me(), Err(Error::VersionDowngrade)));
+        assert!(c.me().is_ok(), "a usable body must not be thrown away");
+        assert_eq!(
+            c.v0_paths(),
+            ["/api/users/me"],
+            "and the endpoint is remembered"
+        );
+    }
+
+    /// A response with no deprecation warning records nothing. Without this the list would
+    /// fill up with every endpoint the session touched and `whoami` would report a problem
+    /// that is not there.
+    #[test]
+    fn an_ordinary_response_is_not_recorded_as_v0() {
+        let mut c = client(vec![MockTransport::ok(ME)]);
+        assert!(c.me().is_ok());
+        assert!(c.v0_paths().is_empty(), "{:?}", c.v0_paths());
+    }
+
+    /// Each endpoint once, however many times it is seen. A session that reads twenty
+    /// comment threads should not report the same path twenty times. Driven through
+    /// `interpret` directly: `me()` is cached for the session, so calling it twice never
+    /// reaches the transport a second time and would prove nothing.
+    #[test]
+    fn a_repeated_v0_endpoint_is_recorded_once() {
+        let warning = "299 - This endpoint is part of the V0 (beta) API.";
+        let v0 = || MockTransport::with_header(MockTransport::ok(ME), "warning", warning);
+        let mut c = client(vec![]);
+
+        assert!(c.interpret(v0(), "/api/articles/1").is_ok());
+        assert!(c.interpret(v0(), "/api/articles/1").is_ok());
+        assert_eq!(
+            c.v0_paths(),
+            ["/api/articles/1"],
+            "the same path twice is one entry"
+        );
+
+        assert!(c.interpret(v0(), "/api/comments").is_ok());
+        assert_eq!(
+            c.v0_paths(),
+            ["/api/articles/1", "/api/comments"],
+            "a different path is a second entry, in the order first seen"
+        );
+
+        // And a clean response beside them adds nothing.
+        assert!(c.interpret(MockTransport::ok(ME), "/api/users/me").is_ok());
+        assert_eq!(c.v0_paths().len(), 2, "{:?}", c.v0_paths());
     }
 
     fn error_for(status: u16, body: &str) -> Error {

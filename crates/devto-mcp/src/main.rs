@@ -7,6 +7,7 @@
 mod config;
 mod knowledge;
 mod protocol;
+mod schema;
 mod server;
 mod text_tools;
 mod tools;
