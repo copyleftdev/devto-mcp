@@ -1,0 +1,99 @@
+#!/bin/sh
+# Run `cargo mutants` under an enforced resource ceiling.
+#
+# Why this exists: cargo-mutants has two independent parallelism knobs and bounding either
+# one alone bounds nothing. `-j` caps how many mutants are tested at once; `--jobserver-tasks`
+# caps how many build tasks run across all of them, and it defaults to NCPUS. A gate setting
+# `-j 8` with `CARGO_BUILD_JOBS=8` therefore asks for 64 concurrent rustc processes on a
+# 64-core box and takes the machine down with it.
+#
+# Everything here derives from one number, the CPU budget, so the two knobs cannot drift
+# apart again:
+#
+#   --jobserver-tasks $BUDGET   total build tasks, all mutants included
+#   -j min($BUDGET, 8)          concurrent cargo processes (cargo-mutants warns above 8)
+#   RUST_TEST_THREADS=1         one test thread each, so -j is also the test-phase bound
+#   CPUQuota=$((BUDGET))00%     a cgroup ceiling, in case a child ignores all of the above
+#
+# Memory is bounded with MemoryHigh, not MemoryMax. MemoryHigh throttles the cgroup and makes
+# the kernel reclaim; MemoryMax kills it. A sweep that runs slowly is fine, one that is
+# OOM-killed at 90% is not — and cargo-mutants reports the partial results of a killed run as
+# though they were complete. MemoryMax is still set, far above MemoryHigh, to catch a genuine
+# runaway. A 32 GiB hard cap killed a 1,166-mutant run here: eight concurrent `cargo` builds
+# of a Rust workspace reach that easily, so the default is now 4 GB per core, not 2.
+#
+# The cgroup scope is the part that actually protects the machine. The rest is cooperation.
+#
+# Env:
+#   MUTANT_CPU_BUDGET   cores to use (default: a quarter of nproc, at least 2)
+#   MUTANT_MEM_BUDGET   systemd MemoryHigh, the throttle (default: 4G per core, capped at a
+#                       quarter of RAM)
+#   MUTANT_MEM_MAX      systemd MemoryMax, the hard kill ceiling (default: half of RAM)
+#   MUTANT_NO_CGROUP=1  skip the systemd scope (for hosts without a delegated cpu controller)
+set -eu
+
+NCPU=$(nproc)
+BUDGET="${MUTANT_CPU_BUDGET:-$(( NCPU / 4 ))}"
+[ "$BUDGET" -lt 2 ] && BUDGET=2
+[ "$BUDGET" -gt "$NCPU" ] && BUDGET="$NCPU"
+
+MEM_GB=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo)
+if [ -z "${MUTANT_MEM_BUDGET:-}" ]; then
+    CAP=$(( MEM_GB / 4 ))
+    WANT=$(( BUDGET * 4 ))
+    [ "$WANT" -gt "$CAP" ] && WANT="$CAP"
+    [ "$WANT" -lt 4 ] && WANT=4
+    MUTANT_MEM_BUDGET="${WANT}G"
+fi
+# The hard ceiling sits well above the throttle: it exists for a runaway, not for normal
+# pressure. Everything below MemoryMax only gets slower, never killed.
+if [ -z "${MUTANT_MEM_MAX:-}" ]; then
+    HARD=$(( MEM_GB / 2 ))
+    [ "$HARD" -lt 8 ] && HARD=8
+    MUTANT_MEM_MAX="${HARD}G"
+fi
+
+# One mutation run per repository at a time. Two concurrent runs share `mutants.out/` and
+# `/tmp/cargo-mutants-*` and collide with `File exists (os error 17)`, having already spent
+# both budgets getting there.
+REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+LOCK="${TMPDIR:-/tmp}/bounded-mutants-$(printf '%s' "$REPO" | md5sum | cut -c1-16).lock"
+
+export RUST_TEST_THREADS=1
+# Let the jobserver be the single authority on build parallelism.
+unset CARGO_BUILD_JOBS || true
+
+# cargo-mutants warns above 8: each job is a whole `cargo` process, and their fixed overhead
+# is not something the jobserver can cap. Build parallelism stays at the full budget; only
+# the number of concurrent cargo processes is held down.
+MUTANT_JOBS="$BUDGET"
+[ "$MUTANT_JOBS" -gt 8 ] && MUTANT_JOBS=8
+
+echo "bounded-mutants: ${MUTANT_JOBS} jobs over ${BUDGET}/${NCPU} cores, throttle at ${MUTANT_MEM_BUDGET}, hard cap ${MUTANT_MEM_MAX}, repo ${REPO}" >&2
+
+run() {
+    exec flock -n "$LOCK" \
+        nice -n 19 ionice -c3 \
+        cargo mutants -j "$MUTANT_JOBS" --jobserver-tasks "$BUDGET" "$@"
+}
+
+# CI runners and bare containers often have no user session bus, so the scope cannot be
+# created. Probe once and fall back rather than failing the gate over a resource limit.
+if [ "${MUTANT_NO_CGROUP:-0}" != "1" ] \
+   && ! systemd-run --user --scope --quiet --collect /bin/true >/dev/null 2>&1; then
+    echo "bounded-mutants: no usable user cgroup scope; cooperative limits only" >&2
+    MUTANT_NO_CGROUP=1
+fi
+
+if [ "${MUTANT_NO_CGROUP:-0}" = "1" ]; then
+    run "$@"
+else
+    exec systemd-run --user --scope --quiet --collect \
+        -p "CPUQuota=${BUDGET}00%" \
+        -p "MemoryHigh=${MUTANT_MEM_BUDGET}" \
+        -p "MemoryMax=${MUTANT_MEM_MAX}" \
+        -p "CPUWeight=20" \
+        -- flock -n "$LOCK" \
+           nice -n 19 ionice -c3 \
+           cargo mutants -j "$MUTANT_JOBS" --jobserver-tasks "$BUDGET" "$@"
+fi

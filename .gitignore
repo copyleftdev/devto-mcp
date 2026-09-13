@@ -1,3 +1,6 @@
 target/
 mutants.out*/
 .hegel/
+
+# Output of a detached gate run (systemd-run --unit).
+mutants-gate.log

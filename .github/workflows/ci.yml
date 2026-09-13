@@ -30,7 +30,12 @@ jobs:
       - name: Gate
         run: ./scripts/gate.sh
         env:
-          # Two concurrent mutants on a four-core runner. Four leaves each mutant test
-          # roughly one core, which is what pushed the slowest ones past the old timeout.
+          # Build parallelism for fmt/clippy/test on a four-core runner.
           JOBS: 2
+          # The mutation sweep is bounded separately by scripts/bounded-mutants, which
+          # derives -j and --jobserver-tasks from this one number. Two leaves each mutant
+          # test roughly one core, which is what pushed the slowest ones past the old
+          # timeout. The runner has no user session bus, so the cgroup ceiling is skipped
+          # there and the cooperative limits carry it.
+          MUTANT_CPU_BUDGET: 2
           MUTANT_TIMEOUT: 600
