@@ -175,10 +175,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Only the packaged archives and the bundle. The `bin-*` artifacts exist so the bundle
+      # job can assemble them and must not reach the release: four of the five targets build
+      # a file named exactly `devto-mcp`, so `merge-multiple` collapses them into one
+      # unlabelled binary and whichever finished last wins. v0.1.0 shipped a `devto-mcp` that
+      # was Mach-O x86_64 — a Linux user downloading it would get a macOS binary.
       - uses: actions/download-artifact@v4
         with:
+          pattern: archive-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: dist
+
+      - name: Nothing unpackaged may ship
+        run: |
+          cd dist
+          ls -la
+          for f in *; do
+            case "$f" in
+              *.tar.gz|*.zip|*.mcpb|server.json) ;;
+              *) echo "unexpected release asset: $f" >&2; exit 1 ;;
+            esac
+          done
 
       - name: Checksums
         run: |
