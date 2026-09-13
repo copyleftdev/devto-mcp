@@ -41,8 +41,17 @@ returns no `X-RateLimit-*` headers at all, so the budget is modelled locally and
 
 ## Install
 
-A prebuilt binary, from the [latest release](https://github.com/copyleftdev/devto-mcp/releases/latest)
-— it needs no toolchain and nothing at runtime, because the datasets are compiled in:
+**One click, in a desktop client that reads MCP bundles.** Download
+`devto-mcp-<version>.mcpb` from the
+[latest release](https://github.com/copyleftdev/devto-mcp/releases/latest) and open it. The
+bundle carries a build for every supported platform and picks the right one; the API key is
+prompted for, and is optional.
+
+Its registry identity is `io.github.copyleftdev/devto-mcp`; `server.json` at the repository
+root is the manifest, and `RELEASING.md` covers publishing it.
+
+**A prebuilt binary**, from the same release — no toolchain, and nothing fetched at runtime
+because the datasets are compiled in:
 
 ```sh
 tar xzf devto-mcp-<version>-<target>.tar.gz

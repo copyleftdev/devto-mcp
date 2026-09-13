@@ -39,3 +39,59 @@ jobs:
           # there and the cooperative limits carry it.
           MUTANT_CPU_BUDGET: 2
           MUTANT_TIMEOUT: 600
+
+  manifests:
+    name: Registry manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # These two files are how the server is found and installed, and nothing else in the
+      # suite touches them. A description one character over the limit is rejected at publish
+      # time, which is the wrong moment to find out.
+      - name: server.json against the published schema
+        run: |
+          curl -fsSL https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json -o /tmp/server.schema.json
+          python3 -m pip install --quiet jsonschema
+          python3 - <<'PY'
+          import json, jsonschema, sys
+          errs = sorted(
+              jsonschema.Draft202012Validator(json.load(open("/tmp/server.schema.json")))
+              .iter_errors(json.load(open("server.json"))),
+              key=lambda e: list(e.path),
+          )
+          for e in errs:
+              print(f"server.json {list(e.path)}: {e.message}", file=sys.stderr)
+          sys.exit(1 if errs else 0)
+          PY
+
+      - name: manifest.json against the MCPB schema
+        run: npx -y @anthropic-ai/mcpb@latest validate mcpb/manifest.json
+
+      # The bundle declares the tools it provides; the server is the authority on that list.
+      - name: The declared tools are the tools the server serves
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo build --release --locked -p devto-mcp
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | ./target/release/devto-mcp > tools.jsonl
+          python3 - <<'PY'
+          import json, sys
+          served = set()
+          for line in open("tools.jsonl"):
+              line = line.strip()
+              if not line:
+                  continue
+              m = json.loads(line)
+              if m.get("id") == 2:
+                  served = {t["name"] for t in m["result"]["tools"]}
+          declared = {t["name"] for t in json.load(open("mcpb/manifest.json"))["tools"]}
+          if served != declared:
+              print(f"declared but not served: {sorted(declared - served)}", file=sys.stderr)
+              print(f"served but not declared: {sorted(served - declared)}", file=sys.stderr)
+              sys.exit(1)
+          print(f"{len(served)} tools, declared and served agree")
+          PY

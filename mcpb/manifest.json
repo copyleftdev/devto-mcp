@@ -1,0 +1,123 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/dist/mcpb-manifest.schema.json",
+  "manifest_version": "0.3",
+  "name": "devto-mcp",
+  "display_name": "DEV (dev.to) authorship",
+  "version": "0.1.0",
+  "description": "Write for dev.to with its rules checked offline, and score the prose rather than the code.",
+  "long_description": "An MCP server for authorship on DEV (dev.to). Every rule the platform enforces is checked offline first, so a rejection costs no API request, and the text tools measure the prose rather than the code \u2014 each score arrives with the share of the document it was computed over. The metrics reproduce Python textstat 0.7.13 byte-for-byte over 58 documents, hyphenation matches pyphen over 20,854 words, and the reading time matches what dev.to itself reports on 30 published articles.",
+  "author": {
+    "name": "copyleftdev",
+    "url": "https://github.com/copyleftdev"
+  },
+  "homepage": "https://github.com/copyleftdev/devto-mcp",
+  "documentation": "https://github.com/copyleftdev/devto-mcp#readme",
+  "support": "https://github.com/copyleftdev/devto-mcp/issues",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "dev.to",
+    "forem",
+    "writing",
+    "readability",
+    "publishing",
+    "authorship"
+  ],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/linux/devto-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/linux/launch.sh",
+      "args": [],
+      "env": {
+        "DEVTO_API_KEY": "${user_config.api_key}"
+      },
+      "platform_overrides": {
+        "darwin": {
+          "command": "${__dirname}/server/darwin/launch.sh"
+        },
+        "win32": {
+          "command": "${__dirname}/server/windows/devto-mcp.exe"
+        }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "analyze_readability",
+      "description": "Readability over an article's prose, with the share of the document that was measured stated alongside it. dev.to articl"
+    },
+    {
+      "name": "analyze_structure",
+      "description": "Heading hierarchy, paragraph lengths, how much of the article is code, link density, and which liquid tags it uses. Answ"
+    },
+    {
+      "name": "create_draft",
+      "description": "Create a new article on dev.to as an unpublished draft. Never publishes \u2014 publishing is a separate, separately-permitted"
+    },
+    {
+      "name": "forem_reading_time",
+      "description": "The reading time dev.to will display, reproduced exactly from Forem's own formula, alongside the figure the prose alone "
+    },
+    {
+      "name": "get_article",
+      "description": "Fetch a published article by numeric id, or by author and slug. Returns the markdown source as well as the metadata. Pub"
+    },
+    {
+      "name": "list_tags",
+      "description": "List dev.to's tags in popularity order. Useful before choosing tags for a draft: a tag that does not already exist will "
+    },
+    {
+      "name": "my_analytics",
+      "description": "Page views, reactions, comments, follower growth, referrers and top contributors for the authenticated account, in a sin"
+    },
+    {
+      "name": "my_articles",
+      "description": "List articles belonging to the authenticated account. This is the only way to see unpublished work \u2014 drafts are not reac"
+    },
+    {
+      "name": "publish_article",
+      "description": "Make one of your drafts visible on dev.to, immediately or at a scheduled time. This is off unless the account holder has"
+    },
+    {
+      "name": "read_comments",
+      "description": "Fetch the comment threads on an article, nested as they appear. Read only: dev.to's API has no endpoint for writing, edi"
+    },
+    {
+      "name": "search_articles",
+      "description": "Find articles, three ways. - feed: browse by tag, author or freshness. No query text. - keyword: literal text matching o"
+    },
+    {
+      "name": "unpublish_article",
+      "description": "Return one of your published articles to draft, so it is no longer visible. The article and its comments are kept; dev.t"
+    },
+    {
+      "name": "update_article",
+      "description": "Change one of your own articles. A partial edit: anything you leave out stays as it is. Works on drafts and on published"
+    },
+    {
+      "name": "validate_draft",
+      "description": "Check an article against every rule dev.to enforces, without sending anything. Costs no network request and no rate-limi"
+    },
+    {
+      "name": "whoami",
+      "description": "Report which dev.to account this server acts for, what it is permitted to do, and how much rate-limit budget is left. Wo"
+    }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ]
+  },
+  "user_config": {
+    "api_key": {
+      "type": "string",
+      "title": "DEV API key",
+      "description": "From dev.to/settings/extensions \u2014 it has to be generated by hand, there is no programmatic way to create one. Leave it empty to run without a key: public reads and the offline validator still work, writing does not.",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}

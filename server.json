@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.copyleftdev/devto-mcp",
+  "title": "DEV (dev.to) authorship",
+  "description": "Write for dev.to with its rules checked offline, and score the prose rather than the code.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/copyleftdev/devto-mcp",
+  "repository": {
+    "url": "https://github.com/copyleftdev/devto-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/copyleftdev/devto-mcp/releases/download/v0.1.0/devto-mcp-v0.1.0.mcpb",
+      "version": "0.1.0",
+      "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DEVTO_API_KEY",
+          "description": "From dev.to/settings/extensions. Optional: without it the server still serves public reads and the offline validator.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
