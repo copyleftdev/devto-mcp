@@ -80,6 +80,9 @@ themselves sets the variable and the claim goes through.
 **Free — no network, no budget**
 
 - `validate_draft` — every rule dev.to enforces, checked offline. Iterate here until clean.
+- `analyze_readability` — six scores over the *prose*, with the share it measured stated.
+- `analyze_structure` — outline and its gaps, paragraph lengths, code and link density.
+- `forem_reading_time` — the figure dev.to will print, and the one over prose alone.
 - `whoami` — account, permissions, and remaining rate budget.
 
 **Reading**
@@ -115,6 +118,58 @@ decision last.
 `scripts/refresh-knowledge.sh <forem-checkout>` re-derives the liquid tag catalogue from
 source, so `git diff` afterwards is exactly the upstream drift.
 
+## Text analysis, and why the denominator is the point
+
+A readability score computed over a dev.to post is mostly measuring the code. The tools here
+segment the document first and say what fraction of it they measured:
+
+```json
+"prose": {
+  "words": 1011, "total_words": 1482, "share_percent": 68.22,
+  "excluded": { "code_blocks": 13, "code_lines": 51, "inline_code_spans": 11,
+                "headings": 11, "liquid_tags": 0 }
+}
+```
+
+That is a real article of the author's: a third of what dev.to counts as its text is shell
+transcripts and headings.
+
+Across the author's own 30 published articles, **23.8% of the words dev.to counts are not
+prose**. Counting them inflates Coleman–Liau by 2.26 grade levels on average and 6.88 at
+worst. **28 of 30** articles have an overstated reading time, the largest by five minutes.
+Nobody reading "grade 13" would know it was computed over a shell transcript.
+
+Block quotes count as prose — a reader reads them. Headings do not: they are structure, and
+counting them flatters the score.
+
+### The numbers are checked against something that is not us
+
+"We implemented Flesch–Kincaid" is not a claim anyone should accept. Every metric is verified
+byte-for-byte against an independent oracle, and the fixtures are checked in so CI proves it
+without Python or Ruby installed:
+
+| Checked | Against | Corpus |
+|---|---|---|
+| Word, letter, sentence and syllable counts | Python `textstat` 0.7.13 | 58 documents |
+| Six readability formulas | Python `textstat` 0.7.13 | 58 documents |
+| Hyphenation positions | `pyphen` | 20,854 words |
+| Forem reading time | dev.to's own published figure | 30 articles, **30/30** |
+| Forem's word count | Ruby's `split(/\W+/)` | 31 cases |
+
+Divergence is a defect in ours until proven otherwise. It has been three times so far: the
+CMUdict edition (`textstat` reads NLTK's older release, which gives `extraordinary` five
+syllables where upstream master gives six), `letter_count` stripping apostrophes that the
+word count keeps, and Ruby's ASCII-only `\w` making `naïve` two words.
+
+Gunning Fog, Dale–Chall and Spache are deliberately absent: all three need a word list whose
+1948 provenance is not worth the licensing question for one metric.
+
+### Datasets
+
+`crates/devto-text/data` carries CMUdict (123,455 entries, BSD-2-clause, compiled to a
+660 KB `fst`) and `hyph_en_US.dic` (Liang's TeX patterns, BSD-style). Both are attributed in
+that directory. They are why the binary is 5.3 MB rather than 4.0.
+
 ## A few things the validator catches that nothing documents
 
 - The body limit is **800 KB of bytes**, not characters.
@@ -133,6 +188,7 @@ crates/devto-core     Types and the offline validator. No I/O, no async, and no 
                       clock — validate() takes the time as an argument.
 crates/devto-client   HTTP. Version header, rate budget, caching, error mapping. The ureq
                       and wall-clock adapter is isolated in one file behind two traits.
+crates/devto-text     Segmentation and text metrics. Pure, no I/O, no clock, like core.
 crates/devto-mcp      The server: dual-era protocol, tools, resources, prompts, permissions.
 docs/                 The research this is built on.
 ```
@@ -153,6 +209,17 @@ held for the process.
 fmt, clippy with `-D warnings`, the full suite, and `cargo mutants` to **zero survivors**.
 The script exports `CI=1` so the property tests derandomize: with random draws a mutation
 score is noise, because cargo-mutants counts any failing suite as a kill.
+
+The sweep runs through `scripts/bounded-mutants`, which holds it inside a cgroup with an
+enforced CPU and memory ceiling — a quarter of the machine by default, `MUTANT_CPU_BUDGET`
+to change it — and takes a per-repo lock so two runs cannot collide. cargo-mutants has two
+independent parallelism knobs and bounding one bounds nothing: `-j` caps concurrent mutants
+while `--jobserver-tasks` caps build tasks across all of them and defaults to `nproc`. Both
+are derived from the one budget here so they cannot drift apart.
+
+Three files are excluded from mutation, all because nothing in them can be killed by a unit
+test, and each is kept deliberately thin because of it: the ureq and wall-clock adapter, the
+stdio loop, and the one-shot CMUdict build script.
 
 `cargo run -p devto-client --example live_check` exercises the read path against the real
 API.

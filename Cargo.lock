@@ -257,6 +257,7 @@ version = "0.1.0"
 dependencies = [
  "devto-client",
  "devto-core",
+ "devto-text",
  "hegeltest",
  "serde",
  "serde_json",

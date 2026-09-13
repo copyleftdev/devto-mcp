@@ -20,14 +20,14 @@ pub struct ToolOutcome {
 }
 
 impl ToolOutcome {
-    fn ok(structured: Value) -> Self {
+    pub(crate) fn ok(structured: Value) -> Self {
         Self {
             structured,
             is_error: false,
         }
     }
 
-    fn failed(message: impl Into<String>, remedy: impl Into<String>) -> Self {
+    pub(crate) fn failed(message: impl Into<String>, remedy: impl Into<String>) -> Self {
         Self {
             structured: json!({ "error": message.into(), "remedy": remedy.into() }),
             is_error: true,
@@ -40,6 +40,12 @@ const TAG_RULE: &str = "Tags are letters and digits only, at most 30 characters 
                         not 'machine-learning'. They are stored lowercased.";
 
 pub fn definitions() -> Vec<Value> {
+    let mut all = api_definitions();
+    all.extend(crate::text_tools::definitions());
+    all
+}
+
+fn api_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "validate_draft",
@@ -363,6 +369,7 @@ pub fn call<T: devto_client::Transport, C: devto_client::Clock>(
         "read_comments" => read_comments(args, ctx),
         "my_analytics" => my_analytics(args, ctx),
         "list_tags" => list_tags(args, ctx),
+        name if crate::text_tools::is_text_tool(name) => text_tool(name, args, ctx),
         "create_draft" => create_draft(args, ctx),
         "update_article" => update_article(args, ctx),
         "publish_article" => publish_article(args, ctx),
@@ -1192,6 +1199,41 @@ fn find_own_article<T: devto_client::Transport, C: devto_client::Clock>(
     }
 }
 
+/// Resolve the body a text tool should measure, then run it.
+///
+/// `body_markdown` costs nothing. `article_id` costs one read, and is offered because the
+/// alternative is making the caller fetch the article itself and paste it back.
+fn text_tool<T: devto_client::Transport, C: devto_client::Clock>(
+    name: &str,
+    args: &Value,
+    ctx: &mut ToolContext<'_, T, C>,
+) -> ToolOutcome {
+    if let Some(body) = args.get("body_markdown").and_then(Value::as_str) {
+        return crate::text_tools::call(name, body);
+    }
+
+    let Some(article_id) = args.get("article_id").and_then(Value::as_i64) else {
+        return ToolOutcome::failed(
+            "nothing to analyse",
+            "Pass body_markdown, or article_id to fetch one of your own articles first.",
+        );
+    };
+    if let Some(outcome) = require_auth(ctx) {
+        return outcome;
+    }
+
+    match find_own_article(article_id, ctx) {
+        Ok(article) => match article.body_markdown {
+            Some(body) => crate::text_tools::call(name, &body),
+            None => ToolOutcome::failed(
+                format!("article {article_id} came back without its markdown"),
+                "Pass body_markdown directly instead.",
+            ),
+        },
+        Err(outcome) => outcome,
+    }
+}
+
 // ---- shared ---------------------------------------------------------------------------
 
 fn u32_of(args: &Value, key: &str) -> Option<u32> {
@@ -1256,7 +1298,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_name_a_description_and_a_bundled_schema() {
         let definitions = definitions();
-        assert_eq!(definitions.len(), 12);
+        assert_eq!(definitions.len(), 15);
 
         for tool in &definitions {
             let name = tool["name"].as_str().expect("name");

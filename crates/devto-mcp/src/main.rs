@@ -8,6 +8,7 @@ mod config;
 mod knowledge;
 mod protocol;
 mod server;
+mod text_tools;
 mod tools;
 
 use std::io::{BufRead, Write};

@@ -85,31 +85,43 @@ pub fn count_sentences(text: &str) -> usize {
 
     let chars: Vec<char> = text.chars().collect();
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let mut fragments: Vec<String> = Vec::new();
-    let mut i = 0;
+    let is_terminator = |c: char| matches!(c, '.' | '!' | '?');
+    let mut sentences = 0usize;
+    let mut fragment_start: Option<usize> = None;
 
-    while i < chars.len() {
-        // `\b` at this position: a word character here, preceded by a non-word or nothing.
-        let at_boundary = is_word(chars[i]) && (i == 0 || !is_word(chars[i - 1]));
-        if !at_boundary {
-            i += 1;
-            continue;
+    // A `for` over the characters rather than a hand-advanced cursor. The two are the same
+    // algorithm until a mutation turns an `i += 1` into `i *= 1`, at which point the cursor
+    // version stops advancing and the suite hangs rather than failing — and a hung gate is
+    // indistinguishable from a slow one.
+    for (i, &c) in chars.iter().enumerate() {
+        // `\b`, right-hand half only: a fragment opens on the first word character after the
+        // previous one closed. The left half of `\b` is implied — there is no open fragment
+        // here, so the preceding character was a terminator or a non-word character.
+        if fragment_start.is_none() && is_word(c) {
+            fragment_start = Some(i);
         }
-
-        // `[^.!?]+` — greedy, at least one.
-        let start = i;
-        while i < chars.len() && !matches!(chars[i], '.' | '!' | '?') {
-            i += 1;
+        // `[^.!?]+` ends here, and the regex's trailing `[.!?]*` is deliberately not captured:
+        // word counting strips punctuation, so those characters cannot change the outcome.
+        if is_terminator(c)
+            && let Some(start) = fragment_start.take()
+        {
+            let fragment: String = chars[start..i].iter().collect();
+            if count_words(&fragment) > 2 {
+                sentences += 1;
+            }
         }
-        // `[.!?]*` — greedy, may be empty.
-        while i < chars.len() && matches!(chars[i], '.' | '!' | '?') {
-            i += 1;
-        }
-        fragments.push(chars[start..i].iter().collect());
     }
 
-    let ignored = fragments.iter().filter(|f| count_words(f) <= 2).count();
-    fragments.len().saturating_sub(ignored).max(1)
+    // A fragment with no terminator to close it runs to the end of the input.
+    if let Some(start) = fragment_start {
+        let fragment: String = chars[start..].iter().collect();
+        if count_words(&fragment) > 2 {
+            sentences += 1;
+        }
+    }
+
+    // textstat floors the count at one for any non-empty input.
+    sentences.max(1)
 }
 
 pub fn count_syllables(text: &str) -> usize {
@@ -180,14 +192,18 @@ impl Counts {
     }
 }
 
-/// A shared empty-input guard: every formula divides by words or sentences.
-pub fn is_measurable(counts: &Counts) -> bool {
-    counts.words > 0 && counts.sentences > 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `_` is a word character for Python's `\w`, so it can open a sentence fragment. Every
+    /// other case here starts on a letter, where the distinction cannot show: the fragments
+    /// have to be short enough that losing a leading `_` drops them under the two-word floor.
+    #[test]
+    fn an_underscore_is_a_word_character() {
+        assert_eq!(count_sentences("_ _ _. _ _ _."), 2);
+        assert_eq!(count_words("_ _ _"), 3);
+    }
 
     #[test]
     fn an_apostrophe_survives_only_inside_a_contraction() {

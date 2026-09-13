@@ -19,10 +19,10 @@
 //! - **Ruby's `String#split` keeps a leading empty field and drops trailing ones.** A body
 //!   opening with `#` therefore counts one more word than it looks like it should.
 //!
-//! What the metric reveals is worth reporting on its own: it counts fenced code, liquid tags
-//! and URLs as prose. Across the corpus 22 of 30 articles have an overstated reading time,
-//! 11.4% of counted words are not prose, and one 14-minute estimate is inflated by four
-//! minutes.
+//! What the metric reveals is worth reporting on its own: it counts fenced code, liquid tags,
+//! headings, list markers and URLs as prose. Measured with [`crate::segment`] across the 30
+//! published articles, **23.8% of counted words are not prose**, **28 of 30** articles have an
+//! overstated reading time, and the largest overstatement is **five minutes**.
 
 use serde::Serialize;
 
@@ -70,14 +70,33 @@ pub fn strip_front_matter(body: &str) -> String {
 
 /// `gsub(/!\[Image Description\]/i, "![ ]")`. Present because Forem does it, and it changes
 /// the count: three words become one.
+///
+/// The match positions are collected first and then applied, so the loop is a `for` over a
+/// fixed list. A `while` advancing a cursor by `found + NEEDLE.len()` says the same thing
+/// until a mutation turns the `+` into a `*`, and then it never advances at all.
 fn replace_image_description(content: &str) -> String {
     const NEEDLE: &str = "![image description]";
-    let lowered = content.to_lowercase();
+    let needle = NEEDLE.as_bytes();
+
+    // Searched over `content` itself rather than a lowercased copy. Lowercasing first and
+    // slicing the original with the offsets it returns is wrong: `İ` is two bytes and
+    // lowercases to three, so every offset past one is shifted and the output quietly gains
+    // or loses a character. The needle is ASCII, so ASCII folding is the only folding that
+    // can match, and a match can only begin on a char boundary.
+    let starts: Vec<usize> = content
+        .as_bytes()
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, window)| window.eq_ignore_ascii_case(needle))
+        .map(|(at, _)| at)
+        .collect();
+
     let mut out = String::with_capacity(content.len());
     let mut cursor = 0;
-
-    while let Some(found) = lowered[cursor..].find(NEEDLE) {
-        let start = cursor + found;
+    for start in starts {
+        if start < cursor {
+            continue; // An overlapping match, already inside one that was replaced.
+        }
         out.push_str(&content[cursor..start]);
         out.push_str("![ ]");
         cursor = start + NEEDLE.len();
@@ -212,6 +231,39 @@ mod tests {
         assert_eq!(
             reading_time("![IMAGE DESCRIPTION](x.png)").counted_words,
             reading_time("![image description](x.png)").counted_words
+        );
+    }
+
+    /// Every earlier case put the substitution at position zero, where `cursor + found` is
+    /// indistinguishable from a subtraction or a multiplication — the offset arithmetic was
+    /// never actually exercised. Here the first match starts partway in and there are two.
+    #[test]
+    fn the_substitution_finds_matches_past_the_start_and_more_than_once() {
+        let body = "Some intro prose ![Image Description](a.png) and more \
+                    prose ![IMAGE description](b.png) and a close.";
+        // Both alt texts collapse to one space each; nothing around them is disturbed.
+        let expected =
+            ruby_word_count("Some intro prose ![ ](a.png) and more prose ![ ](b.png) and a close.");
+        assert_eq!(reading_time(body).counted_words, expected);
+    }
+
+    /// The haystack used to be a lowercased copy of the body, and the offsets it returned were
+    /// used to slice the original. `İ` is two bytes and lowercases to three, so a body
+    /// containing one shifted every offset after it and the substitution landed in the wrong
+    /// place. Forem's own `gsub` has no such seam.
+    #[test]
+    fn a_case_changing_character_does_not_shift_the_substitution() {
+        let dotted = "İ ![Image Description](alpha.png) beta gamma delta";
+        assert_eq!(
+            reading_time(dotted).counted_words,
+            ruby_word_count("İ ![ ](alpha.png) beta gamma delta")
+        );
+        // The same body with an ASCII letter in place of the dotted capital, which is the
+        // case that always worked.
+        let plain = "A ![Image Description](alpha.png) beta gamma delta";
+        assert_eq!(
+            reading_time(plain).counted_words,
+            ruby_word_count("A ![ ](alpha.png) beta gamma delta")
         );
     }
 

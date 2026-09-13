@@ -86,10 +86,21 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
     numerator as f64 / denominator as f64
 }
 
+/// The empty-input guard is `words == 0`, not a test of the two ratios it protects.
+///
+/// Those ratios are zero in exactly that case and no other: with one or more words there is
+/// always at least one sentence, and a token only counts as a word if it holds a word
+/// character, so it carries at least one letter and one syllable. Guarding on the ratios
+/// instead spells the same condition in a way no test can pin down — mutating `||` to `&&`
+/// there changed no output on any of the 58 parity documents, because the two clauses are
+/// never separately true.
+///
+/// `automated_readability_index` genuinely does need two clauses: its characters-per-word is
+/// counted over whitespace tokens, so `"..."` has characters and no words.
 pub fn flesch_reading_ease(counts: &Counts) -> f64 {
     let sentence_length = words_per_sentence(counts);
     let syllables = syllables_per_word(counts);
-    if sentence_length == 0.0 || syllables == 0.0 {
+    if counts.words == 0 {
         return 0.0;
     }
     FRE_BASE - FRE_SENTENCE_LENGTH * sentence_length - FRE_SYLL_PER_WORD * syllables
@@ -98,7 +109,7 @@ pub fn flesch_reading_ease(counts: &Counts) -> f64 {
 pub fn flesch_kincaid_grade(counts: &Counts) -> f64 {
     let sentence_length = words_per_sentence(counts);
     let syllables = syllables_per_word(counts);
-    if sentence_length == 0.0 || syllables == 0.0 {
+    if counts.words == 0 {
         return 0.0;
     }
     (0.39 * sentence_length) + (11.8 * syllables) - 15.59
@@ -115,7 +126,7 @@ pub fn smog_index(counts: &Counts) -> f64 {
 pub fn coleman_liau_index(counts: &Counts) -> f64 {
     let letters = letters_per_word(counts) * 100.0;
     let sentences = sentences_per_word(counts) * 100.0;
-    if letters == 0.0 || sentences == 0.0 {
+    if counts.words == 0 {
         return 0.0;
     }
     (0.058 * letters) - (0.296 * sentences) - 15.8

@@ -53,6 +53,27 @@ mod tests {
     use super::*;
     use crate::hyphen;
 
+    /// `len` and `is_empty` were reachable public API that nothing called and nothing
+    /// checked. Pinning the size also pins the dataset: this is NLTK's edition of CMUdict,
+    /// which is the one `textstat` reads, and it is not the same as cmusphinx master.
+    #[test]
+    fn the_bundled_dictionary_is_nltks_cmudict() {
+        let dict = cmudict();
+        assert!(!dict.is_empty());
+        // `!is_empty()` alone does not pin `is_empty`: a body returning a constant `false`
+        // satisfies it. An actually-empty dictionary is the other half of the statement.
+        let bytes: &'static [u8] =
+            Box::leak(Map::default().into_fst().into_inner().into_boxed_slice());
+        let empty = Cmudict {
+            map: Map::new(bytes).expect("an empty fst"),
+        };
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert_eq!(dict.len(), 123_455, "NLTK's CMUdict, not cmusphinx master");
+        // The word that told the two editions apart: master gives it six.
+        assert_eq!(dict.syllables("extraordinary"), Some(5));
+    }
+
     #[test]
     fn the_dictionary_loads_with_every_entry() {
         assert_eq!(cmudict().len(), 123_455);

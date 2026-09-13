@@ -1,4 +1,4 @@
-//! Readability parity with `textstat` 0.7.13, over the same 52 cases as the counts.
+//! Readability parity with `textstat` 0.7.13, over the same 58 cases as the counts.
 //!
 //! Floats are compared with a tolerance of 1e-9 rather than for bit equality: both sides do
 //! the same arithmetic in the same order, but Rust and CPython need not round an `f64`

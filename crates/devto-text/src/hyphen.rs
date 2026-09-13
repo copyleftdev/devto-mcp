@@ -75,17 +75,18 @@ impl Hyphenator {
             let Some(first) = values.iter().position(|&v| v != 0) else {
                 continue; // pyphen drops patterns whose values are all zero.
             };
-            let last = values
-                .iter()
-                .rposition(|&v| v != 0)
-                .expect("a first implies a last");
 
             max_len = max_len.max(tags.len());
             patterns.insert(
                 tags,
                 Pattern {
+                    // Leading zeros are folded into `offset`; trailing ones are kept. Trimming
+                    // them saved 18.4 KB of 81 KB across 11,015 patterns — 0.35% of the binary
+                    // — and cost an unkillable mutant, because under-trimming a run of no-ops
+                    // cannot change an output and so no test can detect it. The 18 KB is the
+                    // better thing to spend.
                     offset: first,
-                    values: values[first..=last].to_vec(),
+                    values: values[first..].to_vec(),
                 },
             );
         }
@@ -176,22 +177,35 @@ fn split_pattern(pattern: &str) -> (String, Vec<u8>) {
     let chars: Vec<char> = pattern.chars().collect();
     let mut tags = String::new();
     let mut values = Vec::new();
-    let mut i = 0;
+    let mut consumed_as_letter = false;
 
-    while i < chars.len() {
-        let digit = if chars[i].is_ascii_digit() {
-            let d = chars[i] as u8 - b'0';
-            i += 1;
-            d
+    // A `for` over a fixed list, with a flag for the character a digit binds to, rather than a
+    // `while` over a cursor. Both spell the same scan, but a mutation of a cursor's `+= 1`
+    // stops it advancing and hangs the suite; this cannot fail to terminate.
+    for (i, &c) in chars.iter().enumerate() {
+        if consumed_as_letter {
+            consumed_as_letter = false;
+            continue;
+        }
+
+        // A digit gives the value at this position and binds to the character after it;
+        // anything else sits at a position whose value is zero.
+        let (value, letter_at) = if c.is_ascii_digit() {
+            (c as u8 - b'0', i + 1)
         } else {
-            0
+            (0, i)
         };
-        values.push(digit);
-        if i < chars.len() && !chars[i].is_ascii_digit() {
-            tags.push(chars[i]);
-            i += 1;
+        values.push(value);
+
+        // Two digits in a row leave the first with no letter, and so does a trailing digit.
+        if let Some(&letter) = chars.get(letter_at)
+            && !letter.is_ascii_digit()
+        {
+            tags.push(letter);
+            consumed_as_letter = letter_at != i;
         }
     }
+
     // A trailing digit contributes a value with no letter, which is the position after the
     // last character. pyphen's findall produces the same trailing empty match.
     values.push(0);
@@ -268,6 +282,62 @@ mod tests {
             assert!(h.positions(word).is_empty(), "{word:?}");
             assert_eq!(h.syllables(word), 1, "{word:?}");
         }
+    }
+
+    /// The shipped `hyph_en_US.dic` contains no `/` and no `=`, so nothing in the parity
+    /// suite reaches this guard — a mutation loosening it to `||` changed no test. These
+    /// feed `parse` directly, which is the only way to exercise a dictionary we do not ship.
+    #[test]
+    fn non_standard_hyphenation_is_rejected_rather_than_parsed_wrongly() {
+        // `ff1f/ff=f` is the shape this cannot handle: a replacement spelling, not a simple
+        // break point. Accepting it silently would hyphenate the word at the wrong place.
+        let both = "UTF-8\nff1f/ff=f\na1bc\n";
+        assert!(matches!(
+            Hyphenator::parse(both),
+            Err(PatternError::Unsupported(_))
+        ));
+    }
+
+    /// The guard deliberately requires *both* characters. A `/` or an `=` alone is not the
+    /// non-standard form, and rejecting a dictionary over one would be a false refusal.
+    #[test]
+    fn a_slash_or_an_equals_alone_is_still_parseable() {
+        assert!(
+            Hyphenator::parse("UTF-8\na1bc\nde/2f\n").is_ok(),
+            "slash alone"
+        );
+        assert!(
+            Hyphenator::parse("UTF-8\na1bc\nde=2f\n").is_ok(),
+            "equals alone"
+        );
+    }
+
+    /// A pattern line of bare digits carries no letters, so it can never match anything. The
+    /// scan has to start at a slice of length one for that to hold: starting at length zero
+    /// looks up the empty string, which such a pattern *does* key, and it would then apply at
+    /// every position in every word.
+    #[test]
+    fn a_pattern_with_no_letters_applies_nowhere() {
+        let plain = Hyphenator::parse("UTF-8\nhy3ph\n").expect("parses");
+        let with_degenerate = Hyphenator::parse("UTF-8\nhy3ph\n1\n").expect("parses");
+        assert_eq!(
+            plain.raw_positions("hyphenation"),
+            with_degenerate.raw_positions("hyphenation"),
+            "a letterless pattern must not introduce break points"
+        );
+    }
+
+    /// Trailing zeros are kept rather than trimmed, which is only safe because they are
+    /// no-ops: `raw_positions` folds each value in with `max`.
+    #[test]
+    fn a_trailing_zero_is_a_no_op() {
+        let plain = Hyphenator::parse("UTF-8\nhy3ph\n").expect("parses");
+        let padded = Hyphenator::parse("UTF-8\nhy3ph0\n").expect("parses");
+        assert_eq!(
+            plain.raw_positions("hyphen"),
+            padded.raw_positions("hyphen"),
+            "a trailing zero must not move a break point"
+        );
     }
 
     #[test]
