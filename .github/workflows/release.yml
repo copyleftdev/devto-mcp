@@ -20,6 +20,9 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # These take about a minute. The cap is here so an unavailable or retired runner label
+    # fails loudly instead of queueing until someone notices the release never appeared.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +30,10 @@ jobs:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  ext: "" }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: "" }
           - { os: macos-latest,   target: aarch64-apple-darwin,      ext: "" }
-          - { os: macos-13,       target: x86_64-apple-darwin,       ext: "" }
+          # macos-13 was retired on 2025-12-04. A retired label does not fail — the job
+          # sits queued forever, which is why this is pinned rather than left on a guess.
+          # macos-15-intel is the last x86_64 image and is available until August 2027.
+          - { os: macos-15-intel, target: x86_64-apple-darwin,       ext: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,    ext: ".exe" }
     steps:
       - uses: actions/checkout@v5
@@ -88,6 +94,7 @@ jobs:
     name: MCP bundle
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -166,6 +173,7 @@ jobs:
   release:
     needs: [build, bundle]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:
