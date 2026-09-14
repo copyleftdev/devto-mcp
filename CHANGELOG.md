@@ -1,17 +1,35 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed: `/api/tags` is a ranking, not a census
+
+0.2.0 treated absence from `/api/tags` as proof a tag did not exist. It is not. The endpoint
+returns roughly 1,285 tags ordered by popularity and stops; dev.to has many more. `emacs`,
+`devsecops`, `healthcare` and `engineering` all carry hundreds of articles and none of them
+appear in it.
+
+So `check_tag_fit` reported real, working tags as invented — confidently, and with a remedy
+attached. It now distinguishes three outcomes rather than two: **ranked** (with its
+position), **real but unranked** (confirmed by asking whether any article carries the tag,
+one request, only for tags that are not ranked), and **unused** (nothing carries it, so
+publishing invents a dead tag). `author_profile` reports "outside the ranked head" and says
+plainly that this is not the same as unused.
+
+The claim that shipped with 0.2.0 — that 24 of one author's 311 tag slots had gone to tags
+that do not exist — was wrong. Checked properly, every one of those tags is real and in use,
+fourteen of them on 100+ articles. The correct figure for that author is zero.
+
 ## 0.2.0
 
 ### `check_tag_fit`
 
 An article gets four tags and they drive nearly all of its discovery. dev.to creates a tag on
 demand rather than refusing one it has never seen, so an invented tag looks exactly like a
-working one and reaches nobody — and nothing on the platform says otherwise. Across one
-author's 100 published articles, **24 of 311 tag slots** had gone to tags that are not in the
-taxonomy at all.
+working one and reaches nobody — and nothing on the platform says otherwise.
 
-The tool reports what only a server with both halves can know: whether the tag exists in the
-1,285-tag taxonomy, where it ranks (position is the only reach signal the API carries — there
+The tool reports what only a server with both halves can know: where a tag ranks among the
+~1,285 dev.to ranks by popularity (position is the only reach signal the API carries — there
 are no article or follower counts), whether the article's own prose actually uses the term,
 and how often two candidates appear together on real articles. Two tags with heavy overlap
 are buying one audience with two slots.

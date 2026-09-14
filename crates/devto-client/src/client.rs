@@ -136,6 +136,20 @@ impl<T: Transport, C: Clock> DevtoClient<T, C> {
         self.get_json("/api/users/me", Ttl::SESSION, "users/me")
     }
 
+    /// A public profile by username.
+    ///
+    /// The same shape as `/api/users/me`, so it decodes into the same type — minus the
+    /// follower count, which dev.to only reports for the authenticated account.
+    pub fn user_by_username(&mut self, username: &str) -> Result<Me> {
+        let mut qs = QueryString::new();
+        qs.push_opt_str("url", Some(username));
+        self.get_json(
+            &format!("/api/users/by_username{}", qs.finish()),
+            Ttl::DAY,
+            "users/by_username",
+        )
+    }
+
     pub fn my_articles(
         &mut self,
         status: MyArticleStatus,
@@ -218,12 +232,16 @@ impl<T: Transport, C: Clock> DevtoClient<T, C> {
         self.get_json(&format!("/api/tags{}", qs.finish()), Ttl::DAY, "tags")
     }
 
-    /// The whole tag taxonomy, in the order dev.to returns it — which is by popularity.
+    /// The tags dev.to ranks, in the order it returns them — which is by popularity.
+    ///
+    /// **This is not a census.** The endpoint stops at roughly 1,285 tags, and dev.to has
+    /// many more: `emacs`, `devsecops`, `healthcare` and `engineering` all carry articles and
+    /// none of them appear here. Absence from this list means "outside the ranked head", not
+    /// "does not exist" — the only way to settle that is to ask whether any article carries
+    /// the tag.
     ///
     /// There is no way to ask about one tag: `/api/tags/{name}` is a 404 and a `name=` query
-    /// is ignored, so establishing that a tag does *not* exist means reading every page. It
-    /// is roughly 1,300 tags over 13 requests, cached for a day, and that cost is why this is
-    /// a separate call rather than something every tool does quietly.
+    /// is ignored, so getting a rank means reading every page — 13 requests, cached for a day.
     ///
     /// Position is the only reach signal the API offers: the response carries no article
     /// count and no follower count. Rank 1 is `webdev`; the far tail is `putters`.

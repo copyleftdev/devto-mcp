@@ -85,7 +85,7 @@ fn annotations(name: &str) -> Value {
         }
         // Reads that go to dev.to.
         "whoami" | "my_articles" | "get_article" | "search_articles" | "read_comments"
-        | "my_analytics" | "list_tags" | "check_tag_fit" => read_only(true),
+        | "my_analytics" | "list_tags" | "check_tag_fit" | "author_profile" => read_only(true),
 
         "create_draft" => writes(false, false),
         "update_article" => writes(true, true),
@@ -389,17 +389,48 @@ fn api_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "author_profile",
+            "title": "Profile an author from their published record",
+            "description":
+                "What one author's published work looks like, measured rather than \
+                 characterised. Metadata only: no article bodies are fetched, so this costs \
+                 two requests for any author of up to a thousand articles.\n\n\
+                 Reports the shape of their subject matter as reach rather than as a list — \
+                 not 'they write about AI' but what share of their tag slots land in the \
+                 ranked head of the taxonomy and what share falls outside it. Outside is not \
+                 the same as unused: `/api/tags` ranks about 1,285 tags and real ones like \
+                 `emacs` are not among them, so check_tag_fit is what settles an individual \
+                 case.\n\n\
+                 Also reports cadence and the distribution of reactions and comments. It \
+                 does not correlate those with anything: reaction counts move with follower \
+                 growth and posting time, and a hundred articles cannot separate those from \
+                 the writing.",
+            "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string", "description": "The dev.to username, without the @."},
+                    "max_articles": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Default 1000, which is one request and covers almost everyone."}
+                },
+                "required": ["username"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "check_tag_fit",
             "title": "Check candidate tags against the live taxonomy",
             "description":
                 "Measure the tags you are considering against dev.to's own taxonomy, before \
                  they are spent. An article gets four tag slots and they drive nearly all of \
                  its discovery, and nothing on dev.to tells you when one is wasted.\n\n\
-                 What only this can tell you: whether the tag *exists*. dev.to creates a tag \
-                 on demand rather than rejecting it, so an invented tag looks like it worked \
-                 and quietly reaches nobody. Measured across one author's 100 published \
-                 articles, 24 of 311 tag slots had gone to tags that are not in the taxonomy \
-                 at all.\n\n\
+                 What only this can tell you: whether anyone is actually there. dev.to \
+                 creates a tag on demand rather than rejecting it, so an invented tag looks \
+                 like it worked and quietly reaches nobody.\n\n\
+                 Three outcomes, not two. `/api/tags` ranks roughly 1,285 tags by popularity \
+                 and is not a census — `emacs` and `devsecops` are real, carry articles, and \
+                 appear nowhere in it. So a tag is either ranked (with its position), real \
+                 but unranked (smaller reach, confirmed by asking whether any article carries \
+                 it), or genuinely unused.\n\n\
                  Also reports reach — position in the taxonomy is the only such signal the \
                  API offers, as it carries no article or follower counts — and, when other \
                  candidates are given, how often those tags actually appear together on real \
@@ -489,6 +520,7 @@ pub fn call<T: devto_client::Transport, C: devto_client::Clock>(
         "my_analytics" => my_analytics(args, ctx),
         "list_tags" => list_tags(args, ctx),
         "check_tag_fit" => check_tag_fit(args, ctx),
+        "author_profile" => author_profile(args, ctx),
         name if crate::text_tools::is_text_tool(name) => text_tool(name, args, ctx),
         "create_draft" => create_draft(args, ctx),
         "update_article" => update_article(args, ctx),
@@ -999,6 +1031,165 @@ fn my_analytics<T: devto_client::Transport, C: devto_client::Clock>(
     }
 }
 
+/// The median of a slice, which is the honest middle for counts this skewed.
+///
+/// Reaction counts on a body of published work are long-tailed: one piece that went round
+/// pulls a mean somewhere no article actually sits. The median says what a typical piece did.
+fn median(sorted: &[i64]) -> i64 {
+    match sorted.len() {
+        0 => 0,
+        n if n % 2 == 1 => sorted[n / 2],
+        n => (sorted[n / 2 - 1] + sorted[n / 2]) / 2,
+    }
+}
+
+fn author_profile<T: devto_client::Transport, C: devto_client::Clock>(
+    args: &Value,
+    ctx: &mut ToolContext<'_, T, C>,
+) -> ToolOutcome {
+    let Some(username) = args.get("username").and_then(Value::as_str) else {
+        return ToolOutcome::failed(
+            "username is required",
+            "Pass the dev.to username, without the @.",
+        );
+    };
+
+    let profile = match ctx.client.user_by_username(username) {
+        Ok(profile) => profile,
+        Err(error) => return client_failure(error),
+    };
+
+    let per_page = args
+        .get("max_articles")
+        .and_then(Value::as_u64)
+        .unwrap_or(1000) as u32;
+    let articles = match ctx.client.articles(devto_client::ArticleQuery {
+        username: Some(username),
+        per_page: Some(per_page),
+        ..Default::default()
+    }) {
+        Ok(articles) => articles,
+        Err(error) => return client_failure(error),
+    };
+
+    let taxonomy = match ctx.client.all_tags() {
+        Ok(tags) => tags,
+        Err(error) => return client_failure(error),
+    };
+    let rank_of: std::collections::HashMap<&str, usize> = taxonomy
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.name.as_str(), i + 1))
+        .collect();
+
+    // Tag slots, not distinct tags: the question is where the author's four-per-article
+    // budget actually goes, and a tag used forty times has spent forty slots.
+    let mut uses: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut slots = 0usize;
+    for article in &articles {
+        for tag in &article.tag_list {
+            *uses.entry(tag.to_lowercase()).or_default() += 1;
+            slots += 1;
+        }
+    }
+
+    let mut top50 = 0usize;
+    let mut top200 = 0usize;
+    let mut tail = 0usize;
+    let mut absent = 0usize;
+    let mut absent_tags: Vec<&String> = Vec::new();
+    for (tag, count) in &uses {
+        match rank_of.get(tag.as_str()) {
+            Some(&r) if r <= 50 => top50 += count,
+            Some(&r) if r <= 200 => top200 += count,
+            Some(_) => tail += count,
+            None => {
+                absent += count;
+                absent_tags.push(tag);
+            }
+        }
+    }
+
+    let mut ranked: Vec<(&String, &usize)> = uses.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let most_used: Vec<Value> = ranked
+        .iter()
+        .take(15)
+        .map(|(tag, count)| {
+            let rank = rank_of.get(tag.as_str()).copied();
+            json!({
+                "tag": tag,
+                "articles": count,
+                "rank": rank,
+                "reach": rank.map(|r| reach_band(r, taxonomy.len())),
+            })
+        })
+        .collect();
+
+    let share = |n: usize| {
+        if slots == 0 {
+            0.0
+        } else {
+            crate::text_tools::round2(100.0 * n as f64 / slots as f64)
+        }
+    };
+
+    let mut reactions: Vec<i64> = articles.iter().map(|a| a.public_reactions_count).collect();
+    let mut comments: Vec<i64> = articles.iter().map(|a| a.comments_count).collect();
+    reactions.sort_unstable();
+    comments.sort_unstable();
+
+    let mut dates: Vec<&str> = articles
+        .iter()
+        .filter_map(|a| a.published_at.as_deref())
+        .collect();
+    dates.sort_unstable();
+
+    ToolOutcome::ok(json!({
+        "author": {
+            "username": profile.username,
+            "name": profile.name,
+            "summary": profile.summary,
+            "joined_at": profile.joined_at,
+            "location": profile.location,
+            "github_username": profile.github_username,
+            "website_url": profile.website_url,
+        },
+        "corpus": {
+            "articles": articles.len(),
+            "first_published": dates.first(),
+            "last_published": dates.last(),
+            "note": if articles.len() as u32 == per_page {
+                Some("The listing filled the page, so there may be more.")
+            } else {
+                None
+            },
+        },
+        "tags": {
+            "slots_used": slots,
+            "distinct": uses.len(),
+            "where_the_slots_go": {
+                "top_50_percent": share(top50),
+                "top_200_percent": share(top200),
+                "long_tail_percent": share(tail),
+                "outside_the_ranked_head_percent": share(absent),
+            },
+            "outside_the_ranked_head": absent_tags,
+            "note": "Outside the ranked head means outside the ~1,285 tags /api/tags returns, \
+                     which is a popularity ranking rather than a census. Many of these are \
+                     real, used tags with smaller audiences — check_tag_fit will say which.",
+            "most_used": most_used,
+        },
+        "engagement": {
+            "note": "Distribution only. Reaction counts move with follower growth and posting \
+                     time, and a body of work this size cannot separate those from the writing.",
+            "reactions": {"median": median(&reactions), "max": reactions.last().copied().unwrap_or(0)},
+            "comments": {"median": median(&comments), "max": comments.last().copied().unwrap_or(0)},
+        },
+        "cost": "Two requests for the author, plus the tag taxonomy once a day.",
+    }))
+}
+
 /// Letters and digits only, downcased.
 ///
 /// dev.to tags carry no separators, so `machinelearning` is what an article about "machine
@@ -1083,12 +1274,38 @@ fn check_tag_fit<T: devto_client::Transport, C: devto_client::Clock>(
                 }
             }
             None => {
-                missing.push(tag.value.clone());
-                notes.push(
-                    "Not in the taxonomy. dev.to will create it on publish rather than \
-                     refusing it, so this will look like it worked and reach nobody."
-                        .to_string(),
-                );
+                // Absence from the ranked list is not absence from dev.to: the endpoint
+                // stops at ~1,285 tags and `emacs`, `devsecops` and `healthcare` are all
+                // real and all missing from it. One listing request settles which this is.
+                let used = ctx
+                    .client
+                    .articles(devto_client::ArticleQuery {
+                        tag: Some(tag.value.as_str()),
+                        per_page: Some(1),
+                        ..Default::default()
+                    })
+                    .map(|articles| !articles.is_empty());
+                match used {
+                    Ok(true) => notes.push(
+                        "Outside the ranked head of the taxonomy, but real — articles do \
+                         carry it. Smaller reach than a ranked tag, not nothing."
+                            .to_string(),
+                    ),
+                    Ok(false) => {
+                        missing.push(tag.value.clone());
+                        notes.push(
+                            "No article carries this tag. dev.to will create it on publish \
+                             rather than refusing it, so it will look like it worked and \
+                             reach nobody."
+                                .to_string(),
+                        );
+                    }
+                    Err(_) => notes.push(
+                        "Outside the ranked head of the taxonomy. Whether any article uses \
+                         it could not be checked."
+                            .to_string(),
+                    ),
+                }
             }
         }
 
@@ -1147,7 +1364,7 @@ fn check_tag_fit<T: devto_client::Transport, C: devto_client::Clock>(
             "candidates": reports.len(),
         },
         "tags": reports,
-        "not_in_taxonomy": missing,
+        "unused_tags": missing,
     });
 
     if reports.len() > slots {
@@ -1881,34 +2098,175 @@ mod tests {
         format!("[{}]", rows.join(","))
     }
 
-    /// The finding this tool exists for: dev.to creates a tag on demand rather than
-    /// refusing it, so an invented tag looks like it worked and reaches nobody.
+    /// Reaction counts are long-tailed, so the middle is the median and not the mean. Both
+    /// parities, and the empty case, because every arithmetic slip here yields a plausible
+    /// number rather than an obvious one.
     #[test]
-    fn a_tag_outside_the_taxonomy_is_named_as_such() {
-        let tags = taxonomy(&["webdev", "ai", "rust"]);
-        let (result, _) = invoke(
-            "check_tag_fit",
-            json!({"tags": ["rust", "devsecops"]}),
-            &[&tags],
+    fn the_median_is_the_middle_of_either_parity() {
+        assert_eq!(median(&[]), 0, "nothing has no middle");
+        assert_eq!(median(&[5]), 5);
+        assert_eq!(median(&[1, 2, 3]), 2, "odd: the middle element");
+        assert_eq!(median(&[10, 20]), 15, "even: the mean of the two middles");
+        assert_eq!(median(&[1, 2, 3, 4]), 2);
+        assert_eq!(median(&[0, 0, 0, 100]), 0, "one outlier does not move it");
+    }
+
+    /// The profile is metadata only, and the whole point is where the tag slots land. A
+    /// taxonomy of 250 puts one tag in each band and one outside it entirely.
+    #[test]
+    fn a_profile_reports_where_the_tag_slots_land() {
+        let names: Vec<String> = (1..=250).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tags = taxonomy(&refs);
+        const PROFILE: &str = r#"{"id":1,"username":"someone","name":"A Name",
+            "summary":"writes things","joined_at":"Jan 1, 2020","github_username":"gh"}"#;
+        // One article, four slots: rank 1, rank 100, rank 220, and one not ranked at all.
+        const ARTICLES: &str = r#"[{"id":1,"title":"One","tag_list":["t1","t100","t220","zzz"],
+            "public_reactions_count":7,"comments_count":3,"published_at":"2024-01-01T00:00:00Z",
+            "url":"u","path":"p","slug":"s"}]"#;
+
+        let (result, urls) = invoke(
+            "author_profile",
+            json!({"username": "someone"}),
+            &[PROFILE, ARTICLES, &tags],
         );
 
-        let reported = result["tags"].as_array().unwrap();
-        assert_eq!(reported[0]["tag"], json!("rust"));
-        assert_eq!(reported[0]["exists"], json!(true));
-        assert_eq!(reported[0]["rank"], json!(3));
+        assert_eq!(result["author"]["username"], json!("someone"));
+        assert_eq!(result["author"]["github_username"], json!("gh"));
+        assert_eq!(result["corpus"]["articles"], json!(1));
 
-        assert_eq!(reported[1]["tag"], json!("devsecops"));
-        assert_eq!(reported[1]["exists"], json!(false));
-        assert_eq!(reported[1]["rank"], Value::Null);
+        let slots = &result["tags"];
+        assert_eq!(slots["slots_used"], json!(4));
+        assert_eq!(slots["distinct"], json!(4));
+        let where_ = &slots["where_the_slots_go"];
+        assert_eq!(where_["top_50_percent"], json!(25.0));
+        assert_eq!(where_["top_200_percent"], json!(25.0));
+        assert_eq!(where_["long_tail_percent"], json!(25.0));
+        assert_eq!(where_["outside_the_ranked_head_percent"], json!(25.0));
+        assert_eq!(slots["outside_the_ranked_head"], json!(["zzz"]));
+
+        assert_eq!(result["engagement"]["reactions"]["median"], json!(7));
+        assert_eq!(result["engagement"]["comments"]["median"], json!(3));
+
+        // The listing has to be for this author, and ask for enough of them.
+        let listing = urls
+            .iter()
+            .find(|u| u.contains("/api/articles?"))
+            .expect("listing");
+        assert!(listing.contains("username=someone"), "{listing}");
+        assert!(listing.contains("per_page=1000"), "{listing}");
+    }
+
+    /// A band boundary decides which bucket a slot lands in, and 50 and 200 are the edges.
+    #[test]
+    fn the_band_edges_fall_on_the_right_side() {
+        let names: Vec<String> = (1..=250).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tags = taxonomy(&refs);
+        const PROFILE: &str = r#"{"id":1,"username":"s","name":"n","joined_at":"x"}"#;
+        // 50 is still the head; 51 is not. 200 is still established; 201 is the tail.
+        const ARTICLES: &str = r#"[{"id":1,"title":"One","tag_list":["t50","t51","t200","t201"],
+            "public_reactions_count":0,"comments_count":0,"published_at":"2024-01-01T00:00:00Z",
+            "url":"u","path":"p","slug":"s"}]"#;
+
+        let (result, _) = invoke(
+            "author_profile",
+            json!({"username": "s"}),
+            &[PROFILE, ARTICLES, &tags],
+        );
+        let where_ = &result["tags"]["where_the_slots_go"];
+        assert_eq!(where_["top_50_percent"], json!(25.0), "t50 is in the head");
+        assert_eq!(where_["top_200_percent"], json!(50.0), "t51 and t200");
+        assert_eq!(where_["long_tail_percent"], json!(25.0), "t201 is the tail");
+    }
+
+    /// A listing that fills the page might not be the whole record, and saying so is the
+    /// difference between a profile and a misleading one.
+    #[test]
+    fn a_full_page_says_there_may_be_more() {
+        let tags = taxonomy(&["rust"]);
+        const PROFILE: &str = r#"{"id":1,"username":"s","name":"n","joined_at":"x"}"#;
+        const ONE: &str = r#"[{"id":1,"title":"One","tag_list":["rust"],
+            "public_reactions_count":1,"comments_count":0,"published_at":"2024-01-01T00:00:00Z",
+            "url":"u","path":"p","slug":"s"}]"#;
+
+        let (full, _) = invoke(
+            "author_profile",
+            json!({"username": "s", "max_articles": 1}),
+            &[PROFILE, ONE, &tags],
+        );
         assert!(
-            reported[1]["notes"][0]
+            full["corpus"]["note"]
                 .as_str()
                 .unwrap()
-                .contains("create it on publish"),
-            "the silent failure has to be spelled out: {}",
-            reported[1]["notes"][0]
+                .contains("may be more"),
+            "{}",
+            full["corpus"]["note"]
         );
-        assert_eq!(result["not_in_taxonomy"], json!(["devsecops"]));
+
+        let (room, _) = invoke(
+            "author_profile",
+            json!({"username": "s", "max_articles": 50}),
+            &[PROFILE, ONE, &tags],
+        );
+        assert_eq!(
+            room["corpus"]["note"],
+            Value::Null,
+            "one of fifty is the lot"
+        );
+    }
+
+    /// A ranked tag reports its position and asks nothing further.
+    #[test]
+    fn a_ranked_tag_reports_where_it_sits() {
+        let tags = taxonomy(&["webdev", "ai", "rust"]);
+        let (result, urls) = invoke("check_tag_fit", json!({"tags": ["rust"]}), &[&tags]);
+        assert_eq!(result["tags"][0]["rank"], json!(3));
+        assert!(result["tags"][0]["notes"].as_array().unwrap().is_empty());
+        assert_eq!(urls.len(), 1, "a ranked tag needs no second look: {urls:?}");
+    }
+
+    /// The bug 0.2.0 shipped: `/api/tags` ranks about 1,285 tags and stops, so absence from
+    /// it is not absence from dev.to. `emacs` and `devsecops` carry hundreds of articles and
+    /// appear nowhere in that list. Calling them invented was confidently wrong, so an
+    /// unranked tag is now checked rather than assumed.
+    #[test]
+    fn an_unranked_tag_that_articles_carry_is_real() {
+        let tags = taxonomy(&["webdev", "ai"]);
+        let carried =
+            r#"[{"id":1,"title":"x","tag_list":["devsecops"],"url":"u","path":"p","slug":"s"}]"#;
+        let (result, urls) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["devsecops"]}),
+            &[&tags, carried],
+        );
+        let note = result["tags"][0]["notes"][0].as_str().unwrap();
+        assert!(note.contains("but real"), "{note}");
+        assert!(!note.contains("reach nobody"), "{note}");
+        // The probe has to ask about this tag, and only needs to know whether one exists.
+        let probe = urls
+            .iter()
+            .find(|u| u.contains("/api/articles?"))
+            .expect("the unranked tag is probed");
+        assert!(probe.contains("tag=devsecops"), "{probe}");
+        assert!(probe.contains("per_page=1"), "{probe}");
+        assert!(
+            result["unused_tags"].as_array().unwrap().is_empty(),
+            "a used tag is not unused: {}",
+            result["unused_tags"]
+        );
+    }
+
+    /// And the case that really is the failure: nothing carries it, so publishing invents a
+    /// dead tag and dev.to says nothing.
+    #[test]
+    fn an_unranked_tag_nothing_carries_is_a_dead_end() {
+        let tags = taxonomy(&["webdev", "ai"]);
+        let (result, _) = invoke("check_tag_fit", json!({"tags": ["wombat"]}), &[&tags, "[]"]);
+        let note = result["tags"][0]["notes"][0].as_str().unwrap();
+        assert!(note.contains("No article carries this tag"), "{note}");
+        assert!(note.contains("reach nobody"), "{note}");
+        assert_eq!(result["unused_tags"], json!(["wombat"]));
     }
 
     /// Tags are concatenated and prose is not. An article about machine learning never
@@ -2107,7 +2465,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_name_a_description_and_a_bundled_schema() {
         let definitions = definitions();
-        assert_eq!(definitions.len(), 16);
+        assert_eq!(definitions.len(), 17);
 
         for tool in &definitions {
             let name = tool["name"].as_str().expect("name");

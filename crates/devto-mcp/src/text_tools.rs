@@ -121,7 +121,7 @@ fn metrics(readability: &Readability) -> Value {
 
 /// Two decimals. The formulas carry more precision than the inputs justify, and a grade
 /// level quoted to six places invites more confidence than a readability score deserves.
-fn round2(value: f64) -> f64 {
+pub(crate) fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
