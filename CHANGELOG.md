@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.2
+
+### An oracle for the tag tools
+
+The text tools are checked against four things that are not this server — Python `textstat`,
+`pyphen`, Ruby's own `split`, and the reading time dev.to reports for thirty real articles.
+They have been essentially bug-free. The tag tools were checked only against mocks written
+from the same assumptions as the code, and every wrong answer they have given lived in exactly
+that gap.
+
+`crates/devto-mcp/fixtures/tag_observations.json` now records what dev.to says about
+twenty-five real tags: fourteen ranked, eight real but outside the ranked head, and three that
+nothing has ever been published under. `scripts/refresh-tag-oracle.sh` re-captures it, and
+`git diff` afterwards is dev.to changing its mind.
+
+The parity test requires our classification to reproduce dev.to's, tag for tag. Restoring the
+0.2.0 behaviour makes it fail with *"emacs has articles on dev.to but was not reported as
+real"* — the bug named by the tag it got wrong, rather than by a mock.
+
+Ranks are recorded but deliberately not asserted. They move daily, and a fixture that fails
+every week teaches everyone to ignore it; the classification is what holds still.
+
+### Fixed
+
+- **Grounding matched inside longer words.** `ai` was reported three times in an article that
+  never uses the word — it occurs inside "again" and "against". The squashed comparison that
+  lets `machinelearning` match "machine learning" now has to line up with word boundaries in
+  the original. Found by running the tool on its own tutorial.
+- **Tag overlap was a yes-or-no and told you nothing.** Asking whether *any* article carries
+  both tags is true of almost every popular pair — it flagged five of six. It reports a share
+  now: `mcp` and `ai` co-occur on 69% of the sample, `api` and `writing` on none.
+
 ## 0.2.1
 
 ### Fixed: `/api/tags` is a ranking, not a census

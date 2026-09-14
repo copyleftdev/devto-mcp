@@ -3,7 +3,7 @@
   "name": "io.github.copyleftdev/devto-mcp",
   "title": "DEV (dev.to) authorship",
   "description": "Write for dev.to with its rules checked offline, and score the prose rather than the code.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "websiteUrl": "https://github.com/copyleftdev/devto-mcp",
   "repository": {
     "url": "https://github.com/copyleftdev/devto-mcp",
@@ -12,8 +12,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/copyleftdev/devto-mcp/releases/download/v0.2.1/devto-mcp-v0.2.1.mcpb",
-      "version": "0.2.1",
+      "identifier": "https://github.com/copyleftdev/devto-mcp/releases/download/v0.2.2/devto-mcp-v0.2.2.mcpb",
+      "version": "0.2.2",
       "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "transport": {
         "type": "stdio"

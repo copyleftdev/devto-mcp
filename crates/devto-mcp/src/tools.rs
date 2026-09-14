@@ -1191,15 +1191,62 @@ fn author_profile<T: devto_client::Transport, C: devto_client::Clock>(
 }
 
 /// Letters and digits only, downcased.
-///
-/// dev.to tags carry no separators, so `machinelearning` is what an article about "machine
-/// learning" would be tagged. Comparing the two as written finds nothing; comparing them
-/// squashed finds what is actually there.
 fn squash(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// How many times the prose actually uses a tag's term.
+///
+/// Two failure modes pull in opposite directions and both had to be closed.
+///
+/// dev.to tags carry no separators, so an article about "machine learning" would be tagged
+/// `machinelearning` and searching the prose as written finds nothing. Squashing both sides
+/// to letters and digits fixes that — and on its own creates the opposite error: `ai` then
+/// matches inside "again" and "against", and a two-letter tag looks well grounded in an
+/// article that never mentions it. Found by running this on its own tutorial, where `ai`
+/// reported three occurrences and had none.
+///
+/// So the match is made on the squashed text but accepted only where it lines up with word
+/// boundaries in the original: "machine learning" qualifies, "against" does not.
+fn grounded_occurrences(prose: &str, tag: &str) -> usize {
+    let needle = squash(tag);
+    if needle.is_empty() {
+        return 0;
+    }
+
+    // The squashed text, and for each of its characters the index of the character it came
+    // from. That mapping is what lets a match be checked against the original's boundaries.
+    let original: Vec<char> = prose.chars().collect();
+    let mut squashed = String::with_capacity(prose.len());
+    let mut origin: Vec<usize> = Vec::with_capacity(prose.len());
+    for (i, c) in original.iter().enumerate() {
+        if c.is_alphanumeric() {
+            for lowered in c.to_lowercase() {
+                squashed.push(lowered);
+                origin.push(i);
+            }
+        }
+    }
+
+    let squashed: Vec<char> = squashed.chars().collect();
+    let needle: Vec<char> = needle.chars().collect();
+    let mut count = 0;
+    for start in 0..squashed.len().saturating_sub(needle.len() - 1) {
+        if squashed[start..start + needle.len()] != needle[..] {
+            continue;
+        }
+        let first = origin[start];
+        let last = origin[start + needle.len() - 1];
+        let opens = first == 0 || !original[first - 1].is_alphanumeric();
+        let closes = last + 1 == original.len() || !original[last + 1].is_alphanumeric();
+        if opens && closes {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Where a tag sits in a taxonomy of this size, said in words rather than a bare number.
@@ -1251,13 +1298,10 @@ fn check_tag_fit<T: devto_client::Transport, C: devto_client::Clock>(
         .collect();
     let total = taxonomy.len();
 
-    // Tags are concatenated where prose is not: an article about machine learning says
-    // "machine learning", and looking for "machinelearning" in it finds nothing. Squashing
-    // both sides to letters and digits is what makes the comparison mean anything.
     let body = args
         .get("body_markdown")
         .and_then(Value::as_str)
-        .map(|markdown| squash(&devto_text::Document::parse(markdown).prose));
+        .map(|markdown| devto_text::Document::parse(markdown).prose);
 
     let mut reports = Vec::new();
     let mut missing = Vec::new();
@@ -1330,7 +1374,7 @@ fn check_tag_fit<T: devto_client::Transport, C: devto_client::Clock>(
         // Does the article actually talk about this? A tag the prose never mentions is
         // either mis-chosen or the piece has buried its subject.
         let grounding = body.as_ref().map(|prose| {
-            let occurrences = prose.matches(&squash(&tag.value)).count();
+            let occurrences = grounded_occurrences(prose, &tag.value);
             if occurrences == 0 {
                 notes.push(format!(
                     "The prose never uses the word {:?}. That is not fatal, but it is worth \
@@ -1389,16 +1433,19 @@ fn check_tag_fit<T: devto_client::Transport, C: devto_client::Clock>(
 /// How often each pair of candidates actually appears together on real articles.
 ///
 /// One listing request per tag, then the overlap is counted from the tag lists that come
-/// back. This is a sample of what dev.to returns for each tag now, not a census — the sample
-/// size is reported so the number can be weighed rather than taken.
+/// back. This reports a *rate*, not a yes or no: asking whether any single article carries
+/// both tags is nearly always true for popular ones — on this server's own tutorial it
+/// flagged five of six pairs, which is no signal at all. The share of the sample that
+/// carries both is what distinguishes `ai` and `machinelearning`, which genuinely travel
+/// together, from two tags that merely coexist somewhere.
 fn measure_overlap<T: devto_client::Transport, C: devto_client::Clock>(
     tags: &[devto_core::tags::NormalizedTag],
     ctx: &mut ToolContext<'_, T, C>,
 ) -> Value {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
-    let mut seen: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut sampled: HashMap<String, usize> = HashMap::new();
+    // For each tag: the tag lists of the articles carrying it.
+    let mut carried: HashMap<String, Vec<Vec<String>>> = HashMap::new();
     for tag in tags {
         let query = devto_client::ArticleQuery {
             tag: Some(tag.value.as_str()),
@@ -1408,43 +1455,49 @@ fn measure_overlap<T: devto_client::Transport, C: devto_client::Clock>(
         let Ok(articles) = ctx.client.articles(query) else {
             continue;
         };
-        sampled.insert(tag.value.clone(), articles.len());
-        let mut companions = HashSet::new();
-        for article in &articles {
-            for other in &article.tag_list {
-                companions.insert(other.to_lowercase());
-            }
-        }
-        seen.insert(tag.value.clone(), companions);
+        carried.insert(
+            tag.value.clone(),
+            articles
+                .iter()
+                .map(|a| a.tag_list.iter().map(|t| t.to_lowercase()).collect())
+                .collect(),
+        );
     }
 
     let mut pairs = Vec::new();
     for (i, a) in tags.iter().enumerate() {
         for b in tags.iter().skip(i + 1) {
-            let (Some(from_a), Some(n)) = (seen.get(&a.value), sampled.get(&a.value)) else {
+            let Some(sample) = carried.get(&a.value) else {
                 continue;
             };
-            if *n == 0 {
+            if sample.is_empty() {
                 continue;
             }
-            if from_a.contains(&b.value) {
-                pairs.push(json!({
-                    "pair": [a.value, b.value],
-                    "co_occurs": true,
-                    "sampled_articles": n,
-                    "note": format!(
-                        "{:?} appears alongside {:?} in the {n} most recent articles carrying it. \
-                         Two slots, one audience.",
-                        a.value, b.value
-                    ),
-                }));
-            }
+            let both = sample.iter().filter(|list| list.contains(&b.value)).count();
+            let percent = crate::text_tools::round2(100.0 * both as f64 / sample.len() as f64);
+            pairs.push(json!({
+                "pair": [a.value, b.value],
+                "co_occurrence_percent": percent,
+                "articles_with_both": both,
+                "sampled_articles": sample.len(),
+            }));
         }
     }
+    // Loudest first: the pair most worth reconsidering is the one that travels together most.
+    pairs.sort_by(|x, y| {
+        y["co_occurrence_percent"]
+            .as_f64()
+            .partial_cmp(&x["co_occurrence_percent"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     json!({
-        "method": "Up to 100 recent articles per tag, counting which other tags they carry. \
-                   A sample of what is published now, not a census.",
+        "method": "Up to 100 recent articles per tag, counting how many also carry the other \
+                   tag. A sample of what is published now, not a census — and a rate, because \
+                   whether any single article carries both is true of almost any popular pair.",
+        "how_to_read": "A high share means the two tags reach substantially the same readers, \
+                        so spending a slot on each buys one audience twice. A low share means \
+                        they are largely different rooms.",
         "pairs": pairs,
     })
 }
@@ -2061,6 +2114,12 @@ mod tests {
         assert_eq!(pairs.len(), 1, "one pair, not a self-pair: {pairs:?}");
         assert_eq!(pairs[0]["pair"], json!(["ai", "rust"]));
         assert_eq!(pairs[0]["sampled_articles"], json!(1));
+        assert_eq!(pairs[0]["articles_with_both"], json!(1));
+        assert_eq!(
+            pairs[0]["co_occurrence_percent"],
+            json!(100.0),
+            "the one article carrying `ai` also carries `rust`"
+        );
 
         // The query has to name the tag and ask for a sample worth counting.
         let listing: Vec<&String> = urls
@@ -2070,6 +2129,38 @@ mod tests {
         assert_eq!(listing.len(), 2, "one request per tag: {urls:?}");
         assert!(listing[0].contains("tag=ai"), "{}", listing[0]);
         assert!(listing[0].contains("per_page=100"), "{}", listing[0]);
+    }
+
+    /// A rate, not a yes or no. Asking whether *any* article carries both is true of almost
+    /// any popular pair — on this server's own tutorial that flagged five of six pairs, which
+    /// told the reader nothing. The share is what separates tags that travel together from
+    /// tags that merely coexist.
+    #[test]
+    fn overlap_is_a_share_of_the_sample_not_a_yes_or_no() {
+        let page = taxonomy(&["ai", "rust"]);
+        // Two of four, deliberately: with one of four, `100 * both / n` and `100 / both / n`
+        // both come to 25 and the arithmetic goes unchecked.
+        let ai_articles = r#"[
+            {"id":1,"title":"a","tag_list":["ai","rust"],"url":"u","path":"p","slug":"s"},
+            {"id":2,"title":"b","tag_list":["ai","rust"],"url":"u","path":"p","slug":"s"},
+            {"id":3,"title":"c","tag_list":["ai"],"url":"u","path":"p","slug":"s"},
+            {"id":4,"title":"d","tag_list":["ai"],"url":"u","path":"p","slug":"s"}]"#;
+        let rust_articles =
+            r#"[{"id":5,"title":"e","tag_list":["rust"],"url":"u","path":"p","slug":"s"}]"#;
+
+        let (result, _) = invoke(
+            "check_tag_fit",
+            json!({"tags": ["ai", "rust"], "measure_overlap": true}),
+            &[&page, ai_articles, rust_articles],
+        );
+        let pair = &result["overlap"]["pairs"][0];
+        assert_eq!(pair["sampled_articles"], json!(4));
+        assert_eq!(pair["articles_with_both"], json!(2));
+        assert_eq!(
+            pair["co_occurrence_percent"],
+            json!(50.0),
+            "two in four, not \"they overlap\": {pair}"
+        );
     }
 
     /// A tag nobody has published under yields no pair rather than a division by nothing.
@@ -2216,6 +2307,167 @@ mod tests {
         );
     }
 
+    // ---- the tag oracle ----------------------------------------------------------------
+    //
+    // The text tools are checked against textstat, pyphen, Ruby and dev.to's own reading
+    // time. The tag tools had nothing but mocks written from the same assumptions as the
+    // code, and every wrong answer they gave lived in that gap — most of all the one that
+    // called `emacs` and `devsecops` invented because `/api/tags` is a popularity ranking
+    // rather than a census.
+    //
+    // `crates/devto-mcp/fixtures/tag_observations.json` records what dev.to actually says
+    // about twenty-five real tags. Regenerate it with `scripts/refresh-tag-oracle.sh`.
+
+    #[derive(serde::Deserialize)]
+    struct Observation {
+        tag: String,
+        ranked: bool,
+        rank: Option<usize>,
+        used: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TagOracle {
+        taxonomy_size: usize,
+        observations: Vec<Observation>,
+    }
+
+    fn oracle() -> TagOracle {
+        serde_json::from_str(include_str!("../fixtures/tag_observations.json"))
+            .expect("the tag observations fixture")
+    }
+
+    /// The fixture has to keep covering all three cases, or the parity test below quietly
+    /// stops proving the thing it exists to prove.
+    #[test]
+    fn the_tag_oracle_covers_every_classification() {
+        let o = oracle();
+        let ranked = o.observations.iter().filter(|x| x.ranked).count();
+        let unranked_used = o
+            .observations
+            .iter()
+            .filter(|x| !x.ranked && x.used)
+            .count();
+        let unused = o
+            .observations
+            .iter()
+            .filter(|x| !x.ranked && !x.used)
+            .count();
+
+        assert!(ranked >= 5, "only {ranked} ranked tags observed");
+        assert!(
+            unranked_used >= 3,
+            "only {unranked_used} real-but-unranked tags — this is the case that was got \
+             wrong, so it needs the most cover"
+        );
+        assert!(unused >= 2, "only {unused} genuinely unused tags observed");
+        assert!(o.taxonomy_size > 1000, "taxonomy of {}", o.taxonomy_size);
+    }
+
+    /// Our classification must reproduce dev.to's, tag for tag.
+    ///
+    /// Ranks themselves are deliberately not asserted: they move daily, and a fixture that
+    /// fails every week teaches everyone to ignore it. What is asserted is the classification,
+    /// which does not move — `webdev` will not stop being ranked, `emacs` will not stop having
+    /// articles, and keyboard noise will not start.
+    #[test]
+    fn the_classification_matches_what_devto_reports() {
+        let o = oracle();
+        // A taxonomy built from the ranked observations, in their observed order.
+        let mut ranked: Vec<&Observation> = o.observations.iter().filter(|x| x.ranked).collect();
+        ranked.sort_by_key(|x| x.rank.expect("a ranked tag has a rank"));
+        let names: Vec<&str> = ranked.iter().map(|x| x.tag.as_str()).collect();
+        let page = taxonomy(&names);
+
+        let mut checked = 0;
+        for observed in &o.observations {
+            // An unranked tag costs one listing request; supply what dev.to would return.
+            let carried = if observed.used {
+                format!(
+                    r#"[{{"id":1,"title":"x","tag_list":["{}"],"url":"u","path":"p","slug":"s"}}]"#,
+                    observed.tag
+                )
+            } else {
+                "[]".to_string()
+            };
+            let (result, _) = invoke(
+                "check_tag_fit",
+                json!({ "tags": [observed.tag] }),
+                &[&page, &carried],
+            );
+            let reported = &result["tags"][0];
+            let notes = reported["notes"].as_array().unwrap();
+            let said = notes
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if observed.ranked {
+                assert!(
+                    reported["rank"].is_number(),
+                    "{} is ranked on dev.to but reported unranked",
+                    observed.tag
+                );
+                assert!(
+                    !said.contains("reach nobody"),
+                    "{} is ranked and was called dead: {said}",
+                    observed.tag
+                );
+            } else if observed.used {
+                // The case 0.2.0 got wrong, on the tags it got wrong.
+                assert!(
+                    said.contains("but real"),
+                    "{} has articles on dev.to but was not reported as real: {said}",
+                    observed.tag
+                );
+                assert!(
+                    !said.contains("reach nobody"),
+                    "{} has articles and was called dead — this is the 0.2.0 bug: {said}",
+                    observed.tag
+                );
+                assert!(
+                    result["unused_tags"].as_array().unwrap().is_empty(),
+                    "{} was listed as unused: {}",
+                    observed.tag,
+                    result["unused_tags"]
+                );
+            } else {
+                assert!(
+                    said.contains("No article carries this tag"),
+                    "{} has no articles and was not reported as unused: {said}",
+                    observed.tag
+                );
+                assert_eq!(result["unused_tags"], json!([observed.tag]));
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, o.observations.len());
+    }
+
+    /// The band a rank falls in is the other half of what the tool claims, so the observed
+    /// ranks are run through it and the result has to be sane rather than merely present.
+    #[test]
+    fn observed_ranks_land_in_a_sensible_band() {
+        let o = oracle();
+        for observed in o.observations.iter().filter(|x| x.ranked) {
+            let rank = observed.rank.unwrap();
+            let band = reach_band(rank, o.taxonomy_size);
+            assert!(
+                !band.is_empty() && band != "unranked",
+                "{} -> {band}",
+                observed.tag
+            );
+            if rank <= 50 {
+                assert!(
+                    band.contains("front page"),
+                    "{} at {rank} -> {band}",
+                    observed.tag
+                );
+            }
+        }
+    }
+
     /// A ranked tag reports its position and asks nothing further.
     #[test]
     fn a_ranked_tag_reports_where_it_sits() {
@@ -2267,6 +2519,52 @@ mod tests {
         assert!(note.contains("No article carries this tag"), "{note}");
         assert!(note.contains("reach nobody"), "{note}");
         assert_eq!(result["unused_tags"], json!(["wombat"]));
+    }
+
+    /// Both directions of the grounding error, in one place.
+    ///
+    /// A concatenated tag has to match spaced prose, or every multi-word tag reads as
+    /// ungrounded. And it must not match inside a longer word, or a short tag reads as
+    /// grounded everywhere: `ai` occurs in "again" and "against", which is how this was
+    /// found — the tool reported three mentions of `ai` in an article that never says it.
+    #[test]
+    fn grounding_respects_word_boundaries_in_both_directions() {
+        assert_eq!(
+            grounded_occurrences(
+                "This is about machine learning, at length.",
+                "machinelearning"
+            ),
+            1,
+            "spaced prose grounds a concatenated tag"
+        );
+        assert_eq!(
+            grounded_occurrences("I said it again, and against my better judgement.", "ai"),
+            0,
+            "a short tag must not match inside a longer word"
+        );
+        assert_eq!(
+            grounded_occurrences("AI is the subject here, and ai again.", "ai"),
+            2,
+            "but a standalone use counts, whatever its case"
+        );
+        assert_eq!(
+            grounded_occurrences("Rust and rusty nails are different things.", "rust"),
+            1,
+            "\"rusty\" is not \"rust\""
+        );
+        assert_eq!(grounded_occurrences("nothing relevant", "webdev"), 0);
+        assert_eq!(grounded_occurrences("", "ai"), 0, "no prose, no grounding");
+        // Punctuation is a boundary, so a tag at the end of a sentence still counts.
+        assert_eq!(grounded_occurrences("All about rust.", "rust"), 1);
+        // And so is the end of the text itself, with no punctuation to lean on — the other
+        // branch of the closing check, which a trailing full stop never reaches.
+        assert_eq!(grounded_occurrences("all about rust", "rust"), 1);
+        assert_eq!(grounded_occurrences("rust", "rust"), 1, "the whole text");
+        assert_eq!(
+            grounded_occurrences("rusty", "rust"),
+            0,
+            "a prefix is not a match"
+        );
     }
 
     /// Tags are concatenated and prose is not. An article about machine learning never

@@ -1,0 +1,195 @@
+{
+  "captured": "2026-09-13",
+  "source": "dev.to /api/tags and /api/articles?tag=",
+  "note": "Ranks move daily and are recorded for information. The tests assert the classification \u2014 ranked, unranked-but-used, unused \u2014 which does not.",
+  "taxonomy_size": 1285,
+  "top_ten": [
+    "webdev",
+    "ai",
+    "programming",
+    "javascript",
+    "beginners",
+    "productivity",
+    "tutorial",
+    "python",
+    "devops",
+    "react"
+  ],
+  "observations": [
+    {
+      "tag": "webdev",
+      "ranked": true,
+      "rank": 1,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "ai",
+      "ranked": true,
+      "rank": 2,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "programming",
+      "ranked": true,
+      "rank": 3,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "javascript",
+      "ranked": true,
+      "rank": 4,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "python",
+      "ranked": true,
+      "rank": 8,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "devops",
+      "ranked": true,
+      "rank": 9,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "rust",
+      "ranked": true,
+      "rank": 32,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "testing",
+      "ranked": true,
+      "rank": 34,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "security",
+      "ranked": true,
+      "rank": 13,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "mcp",
+      "ranked": true,
+      "rank": 92,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "llm",
+      "ranked": true,
+      "rank": 36,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "architecture",
+      "ranked": true,
+      "rank": 23,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "distributedsystems",
+      "ranked": true,
+      "rank": 198,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "softwaredevelopment",
+      "ranked": true,
+      "rank": 54,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "emacs",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "devsecops",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "healthcare",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "engineering",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "osint",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "redteam",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 100,
+      "used": true
+    },
+    {
+      "tag": "formalmethods",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 28,
+      "used": true
+    },
+    {
+      "tag": "streamprocessing",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 28,
+      "used": true
+    },
+    {
+      "tag": "qwertyuiopnonsense",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 0,
+      "used": false
+    },
+    {
+      "tag": "zzzznotarealtagatall",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 0,
+      "used": false
+    },
+    {
+      "tag": "wombat",
+      "ranked": false,
+      "rank": null,
+      "articles_in_first_100": 0,
+      "used": false
+    }
+  ]
+}
